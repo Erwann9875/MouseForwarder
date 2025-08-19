@@ -167,6 +167,10 @@ WM_INPUT = 0x00FF
 RID_INPUT = 0x10000003
 RIDEV_INPUTSINK = 0x00000100
 RIM_TYPEMOUSE = 0
+WH_MOUSE_LL = 14
+WH_KEYBOARD_LL = 13
+WM_KEYDOWN = 0x0100
+VK_ESCAPE = 0x1B
 
 try:
     HRAWINPUT = wintypes.HRAWINPUT
@@ -212,6 +216,14 @@ class RAWINPUTDEVICE(ctypes.Structure):
         ('dwFlags', wintypes.DWORD),
         ('hwndTarget', wintypes.HWND),
     ]
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ('vkCode', wintypes.DWORD),
+        ('scanCode', wintypes.DWORD),
+        ('flags', wintypes.DWORD),
+        ('time', wintypes.DWORD),
+        ('dwExtraInfo', ctypes.c_void_p),
+    ]
 
 GetRawInputData = user32.GetRawInputData
 GetRawInputData.restype = UINT
@@ -219,6 +231,63 @@ GetRawInputData.argtypes = [HRAWINPUT, UINT, ctypes.c_void_p, ctypes.POINTER(UIN
 RegisterRawInputDevices = user32.RegisterRawInputDevices
 RegisterRawInputDevices.restype = wintypes.BOOL
 RegisterRawInputDevices.argtypes = [ctypes.POINTER(RAWINPUTDEVICE), UINT, UINT]
+
+class MouseBlocker:
+    def __init__(self):
+        self._hook = None
+        self._proc = None
+
+    def start(self):
+        if self._hook:
+            return
+
+        LowLevelMouseProc = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+        def _callback(nCode, wParam, lParam):
+            if nCode >= 0:
+                return 1
+            return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
+
+        self._proc = LowLevelMouseProc(_callback)
+        h_mod = ctypes.windll.kernel32.GetModuleHandleW(None)
+        self._hook = user32.SetWindowsHookExW(WH_MOUSE_LL, self._proc, h_mod, 0)
+
+    def stop(self):
+        if self._hook:
+            user32.UnhookWindowsHookEx(self._hook)
+            self._hook = None
+            self._proc = None
+
+class EscapeListener:
+    def __init__(self, on_escape):
+        self.on_escape = on_escape
+        self._hook = None
+        self._proc = None
+
+    def start(self):
+        if self._hook:
+            return
+
+        LowLevelKeyboardProc = ctypes.WINFUNCTYPE(
+            ctypes.c_int, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
+        )
+
+        def _callback(nCode, wParam, lParam):
+            if nCode >= 0 and wParam == WM_KEYDOWN:
+                kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                if kb.vkCode == VK_ESCAPE:
+                    self.on_escape()
+            return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
+
+        self._proc = LowLevelKeyboardProc(_callback)
+        h_mod = ctypes.windll.kernel32.GetModuleHandleW(None)
+        self._hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._proc, h_mod, 0)
+
+    def stop(self):
+        if self._hook:
+            user32.UnhookWindowsHookEx(self._hook)
+            self._hook = None
+            self._proc = None
 
 class SerialSender(QtCore.QObject):
     connectedChanged = QtCore.Signal(bool)
@@ -472,6 +541,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.forwarding = False
         self.filter = None
+        self.blocker = MouseBlocker()
+        self.escape = EscapeListener(self._on_escape)
 
         self.flashProgress.connect(self._on_flash_progress)
         self.flashLogLine.connect(self._on_flash_log)
@@ -528,10 +599,18 @@ class MainWindow(QtWidgets.QMainWindow):
             if not self.filter:
                 self.filter = RawInputFilter(hwnd, self._on_delta)
                 app.installNativeEventFilter(self.filter)
+            self.blocker.start()
+            self.escape.start()
         else:
             if self.filter:
                 app.removeNativeEventFilter(self.filter)
                 self.filter = None
+            self.blocker.stop()
+            self.escape.stop()
+
+    def _on_escape(self):
+        if self.forwarding:
+            QtCore.QTimer.singleShot(0, lambda: self.toggleBtn.setChecked(False))
 
     def _on_delta(self, dx:int, dy:int):
         if self.forwarding and self.sender.ser:
@@ -539,6 +618,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_stats(self, pps:int):
         self.rateLbl.setText(f"{pps} pkts/s")
+
+    def closeEvent(self, event):
+        try:
+            self.blocker.stop()
+            self.escape.stop()
+        finally:
+            super().closeEvent(event)
 
     def locate_bossac(self) -> str | None:
         if self._bossac_path and os.path.isfile(self._bossac_path):
