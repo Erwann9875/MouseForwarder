@@ -395,7 +395,14 @@ class RawInputFilter(QtCore.QAbstractNativeEventFilter):
     def nativeEventFilter(self, eventType, message):
         if eventType != b'windows_generic_MSG':
             return False, 0
-        msg = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents
+        try:
+            addr = int(message)
+        except TypeError:
+            addr = message.__int__()
+
+        pmsg = ctypes.cast(ctypes.c_void_p(addr), ctypes.POINTER(wintypes.MSG))
+        msg = pmsg.contents
+
         if msg.message == WM_INPUT:
             self._handle_wm_input(msg.lParam)
         return False, 0
