@@ -512,7 +512,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.connectBtn.setText("Connect")
 
     def on_connected_changed(self, ok:bool):
+        self.connectBtn.blockSignals(True)
         self.connectBtn.setChecked(ok)
+        self.connectBtn.blockSignals(False)
         if ok:
             self.statusLbl.setText("Connected")
         elif self.statusLbl.text() != "Failed":
