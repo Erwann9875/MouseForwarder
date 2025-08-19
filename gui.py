@@ -188,6 +188,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("Mouse forwarder - Fizo")
         self.setMinimumSize(520, 260)
+        self.statusBar()
 
         self.sender = SerialSender()
         self.sender.connectedChanged.connect(self.on_connected_changed)
@@ -203,6 +204,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refreshBtn = QtWidgets.QPushButton("Refresh")
         self.connectBtn = QtWidgets.QPushButton("Connect")
         self.connectBtn.setCheckable(True)
+        self.connectBtn.setEnabled(False)
         self.statusLbl = QtWidgets.QLabel("Disconnected")
         l1.addWidget(QtWidgets.QLabel("COM Port:"), 0, 0)
         l1.addWidget(self.portCombo, 0, 1)
@@ -241,6 +243,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fill_ports()
 
     def fill_ports(self):
+        current = self.portCombo.currentData()
         self.portCombo.clear()
         items = []
         for p in serial.tools.list_ports.comports():
@@ -249,14 +252,24 @@ class MainWindow(QtWidgets.QMainWindow):
         items.sort(key=lambda x: ("arduino" not in x[0].lower(), x[0].lower()))
         for label, dev in items:
             self.portCombo.addItem(label, dev)
+            if dev == current:
+                idx = self.portCombo.count() - 1
+                self.portCombo.setCurrentIndex(idx)
+        if not items:
+            self.portCombo.addItem("No ports found", None)
+        self.connectBtn.setEnabled(bool(items))
+        self.statusBar().showMessage(f"Found {len(items)} port(s)", 3000)
 
     def on_connect_toggled(self, checked):
         if checked:
             port = self.portCombo.currentData()
-            ok = self.sender.open(port, 1000000)
+            ok = self.sender.open(port, 1000000) if port else False
             if not ok:
                 self.statusLbl.setText("Failed")
+                self.connectBtn.blockSignals(True)
                 self.connectBtn.setChecked(False)
+                self.connectBtn.blockSignals(False)
+                self.connectBtn.setText("Connect")
                 return
             self.statusLbl.setText(f"Connected @ 1,000,000")
             self.connectBtn.setText("Disconnect")
@@ -267,11 +280,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_connected_changed(self, ok:bool):
         self.connectBtn.setChecked(ok)
-        self.statusLbl.setText("Connected" if ok else "Disconnected")
+        if ok:
+            self.statusLbl.setText("Connected")
+        elif self.statusLbl.text() != "Failed":
+            self.statusLbl.setText("Disconnected")
 
     def on_toggle_forwarding(self, enabled):
         self.forwarding = enabled
-        self.toggleBtn.setText("Stop Forwarding" if enabled else "Start Forwarding")
+        self.toggleBtn.setText("Stop forwarding" if enabled else "Start forwarding")
         app = QtWidgets.QApplication.instance()
         if enabled:
             hwnd = int(self.winId())
