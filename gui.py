@@ -162,7 +162,7 @@ BOSSAC_URL = "https://downloads.arduino.cc/tools/bossac-1.9.1-arduino2-windows.t
 APP_NAME = "MouseControler - Fizo"
 TOOLS_SUBDIR = "tools"
 
-user32 = ctypes.windll.user32
+user32 = ctypes.WinDLL("user32", use_last_error=True)
 WM_INPUT = 0x00FF
 RID_INPUT = 0x10000003
 RIDEV_INPUTSINK = 0x00000100
@@ -232,6 +232,28 @@ RegisterRawInputDevices = user32.RegisterRawInputDevices
 RegisterRawInputDevices.restype = wintypes.BOOL
 RegisterRawInputDevices.argtypes = [ctypes.POINTER(RAWINPUTDEVICE), UINT, UINT]
 
+HHOOK = wintypes.HANDLE
+
+if ctypes.sizeof(ctypes.c_void_p) == ctypes.sizeof(ctypes.c_long):
+    WPARAM = ctypes.c_ulong
+    LPARAM = ctypes.c_long
+    LRESULT = ctypes.c_long
+else:
+    WPARAM = ctypes.c_ulonglong
+    LPARAM = ctypes.c_longlong
+    LRESULT = ctypes.c_longlong
+
+HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, WPARAM, LPARAM)
+SetWindowsHookEx = user32.SetWindowsHookExW
+SetWindowsHookEx.restype = HHOOK
+SetWindowsHookEx.argtypes = [ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
+CallNextHookEx = user32.CallNextHookEx
+CallNextHookEx.restype = LRESULT
+CallNextHookEx.argtypes = [HHOOK, ctypes.c_int, WPARAM, LPARAM]
+UnhookWindowsHookEx = user32.UnhookWindowsHookEx
+UnhookWindowsHookEx.restype = wintypes.BOOL
+UnhookWindowsHookEx.argtypes = [HHOOK]
+
 class MouseBlocker:
     def __init__(self):
         self._hook = None
@@ -241,20 +263,20 @@ class MouseBlocker:
         if self._hook:
             return
 
-        LowLevelMouseProc = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
-
         def _callback(nCode, wParam, lParam):
             if nCode >= 0:
                 return 1
-            return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
+            return CallNextHookEx(self._hook, nCode, wParam, lParam)
 
-        self._proc = LowLevelMouseProc(_callback)
-        h_mod = ctypes.windll.kernel32.GetModuleHandleW(None)
-        self._hook = user32.SetWindowsHookExW(WH_MOUSE_LL, self._proc, h_mod, 0)
+        self._proc = HOOKPROC(_callback)
+        self._hook = SetWindowsHookEx(WH_MOUSE_LL, self._proc, 0, 0)
+        if not self._hook:
+            err = ctypes.get_last_error()
+            raise OSError(err, ctypes.FormatError(err))
 
     def stop(self):
         if self._hook:
-            user32.UnhookWindowsHookEx(self._hook)
+            UnhookWindowsHookEx(self._hook)
             self._hook = None
             self._proc = None
 
@@ -268,24 +290,23 @@ class EscapeListener:
         if self._hook:
             return
 
-        LowLevelKeyboardProc = ctypes.WINFUNCTYPE(
-            ctypes.c_int, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
-        )
-
         def _callback(nCode, wParam, lParam):
             if nCode >= 0 and wParam == WM_KEYDOWN:
                 kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
                 if kb.vkCode == VK_ESCAPE:
                     self.on_escape()
-            return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
+                    return 1
+            return CallNextHookEx(self._hook, nCode, wParam, lParam)
 
-        self._proc = LowLevelKeyboardProc(_callback)
-        h_mod = ctypes.windll.kernel32.GetModuleHandleW(None)
-        self._hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._proc, h_mod, 0)
+        self._proc = HOOKPROC(_callback)
+        self._hook = SetWindowsHookEx(WH_KEYBOARD_LL, self._proc, 0, 0)
+        if not self._hook:
+            err = ctypes.get_last_error()
+            raise OSError(err, ctypes.FormatError(err))
 
     def stop(self):
         if self._hook:
-            user32.UnhookWindowsHookEx(self._hook)
+            UnhookWindowsHookEx(self._hook)
             self._hook = None
             self._proc = None
 
