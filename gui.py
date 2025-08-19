@@ -182,12 +182,21 @@ class RAWINPUTHEADER(ctypes.Structure):
         ('hDevice', wintypes.HANDLE),
         ('wParam', wintypes.WPARAM),
     ]
-class RAWMOUSE(ctypes.Structure):
+class RAWMOUSEBUTTONS(ctypes.Structure):
     _fields_ = [
-        ('usFlags', wintypes.USHORT),
-        ('ulButtons', wintypes.ULONG),
         ('usButtonFlags', wintypes.USHORT),
         ('usButtonData', wintypes.USHORT),
+    ]
+class RAWMOUSEUNION(ctypes.Union):
+    _fields_ = [
+        ('ulButtons', wintypes.ULONG),
+        ('buttons', RAWMOUSEBUTTONS),
+    ]
+class RAWMOUSE(ctypes.Structure):
+    _anonymous_ = ('u',)
+    _fields_ = [
+        ('usFlags', wintypes.USHORT),
+        ('u', RAWMOUSEUNION),
         ('ulRawButtons', wintypes.ULONG),
         ('lLastX', wintypes.LONG),
         ('lLastY', wintypes.LONG),
@@ -297,7 +306,7 @@ class RawInputFilter(QtCore.QAbstractNativeEventFilter):
     def nativeEventFilter(self, eventType, message):
         if eventType != b'windows_generic_MSG':
             return False, 0
-        msg = ctypes.cast(message, ctypes.POINTER(wintypes.MSG)).contents
+        msg = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents
         if msg.message == WM_INPUT:
             self._handle_wm_input(msg.lParam)
         return False, 0
