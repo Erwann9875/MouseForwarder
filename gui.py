@@ -145,7 +145,6 @@ def _anti_reverse_engineering_guard():
     except Exception:
         pass
 
-
 def _guard_thread_loop():
     _hide_from_debugger()
     while True:
