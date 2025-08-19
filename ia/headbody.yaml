@@ -1,0 +1,8 @@
+path: C:\Users\Erwann\Downloads\YoloV5 Valorant Dataset.v2i.yolov8
+train: train/images
+val: valid/images
+test: test/images
+
+names:
+  0: body
+  1: head
