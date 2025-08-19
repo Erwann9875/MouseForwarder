@@ -1,10 +1,16 @@
-import sys, struct, threading, queue, time, ctypes
+import sys, struct, threading, queue, time, ctypes, subprocess, os, shutil, json, re, tarfile, urllib.request
 from ctypes import wintypes
 import serial, serial.tools.list_ports
 from PySide6 import QtCore, QtWidgets
 
-user32 = ctypes.windll.user32
+if sys.platform != "win32":
+    raise SystemExit("This app supports Windows only.")
 
+BOSSAC_URL = "https://downloads.arduino.cc/tools/bossac-1.9.1-arduino2-windows.tar.gz"
+APP_NAME = "MouseControler - Fizo"
+TOOLS_SUBDIR = "tools"
+
+user32 = ctypes.windll.user32
 WM_INPUT = 0x00FF
 RID_INPUT = 0x10000003
 RIDEV_INPUTSINK = 0x00000100
@@ -14,7 +20,6 @@ try:
     HRAWINPUT = wintypes.HRAWINPUT
 except AttributeError:
     HRAWINPUT = wintypes.HANDLE
-
 UINT = getattr(wintypes, 'UINT', ctypes.c_uint)
 
 class RAWINPUTHEADER(ctypes.Structure):
@@ -24,7 +29,6 @@ class RAWINPUTHEADER(ctypes.Structure):
         ('hDevice', wintypes.HANDLE),
         ('wParam', wintypes.WPARAM),
     ]
-
 class RAWMOUSE(ctypes.Structure):
     _fields_ = [
         ('usFlags', wintypes.USHORT),
@@ -36,14 +40,10 @@ class RAWMOUSE(ctypes.Structure):
         ('lLastY', wintypes.LONG),
         ('ulExtraInfo', wintypes.ULONG),
     ]
-
 class RAWINPUTUNION(ctypes.Union):
     _fields_ = [('mouse', RAWMOUSE)]
-
 class RAWINPUT(ctypes.Structure):
-    _fields_ = [('header', RAWINPUTHEADER),
-                ('data', RAWINPUTUNION)]
-
+    _fields_ = [('header', RAWINPUTHEADER), ('data', RAWINPUTUNION)]
 class RAWINPUTDEVICE(ctypes.Structure):
     _fields_ = [
         ('usUsagePage', wintypes.USHORT),
@@ -54,15 +54,10 @@ class RAWINPUTDEVICE(ctypes.Structure):
 
 GetRawInputData = user32.GetRawInputData
 GetRawInputData.restype = UINT
-GetRawInputData.argtypes = [
-    HRAWINPUT, UINT, ctypes.c_void_p, ctypes.POINTER(UINT), UINT
-]
-
+GetRawInputData.argtypes = [HRAWINPUT, UINT, ctypes.c_void_p, ctypes.POINTER(UINT), UINT]
 RegisterRawInputDevices = user32.RegisterRawInputDevices
 RegisterRawInputDevices.restype = wintypes.BOOL
-RegisterRawInputDevices.argtypes = [
-    ctypes.POINTER(RAWINPUTDEVICE), UINT, UINT
-]
+RegisterRawInputDevices.argtypes = [ctypes.POINTER(RAWINPUTDEVICE), UINT, UINT]
 
 class SerialSender(QtCore.QObject):
     connectedChanged = QtCore.Signal(bool)
@@ -181,14 +176,77 @@ QComboBox { background: #1c1f27; border: 1px solid #2a2f3a; padding: 6px; border
 QLabel { color: #e6e6e6; }
 QGroupBox { border: 1px solid #2a2f3a; border-radius: 8px; margin-top: 12px; }
 QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 4px 8px; color: #a9b1c7; }
+QProgressBar { border: 1px solid #2a2f3a; border-radius: 6px; background: #1c1f27; text-align: center; }
+QProgressBar::chunk { background-color: #2e8bff; }
 """
 
+def appdata_dir():
+    base = os.getenv("APPDATA") or os.path.expanduser("~")
+    folder = os.path.join(base, APP_NAME)
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+def config_path():
+    return os.path.join(appdata_dir(), "config.json")
+
+def tools_dir():
+    td = os.path.join(appdata_dir(), TOOLS_SUBDIR)
+    os.makedirs(td, exist_ok=True)
+    return td
+
+def load_config():
+    try:
+        with open(config_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_config(cfg: dict):
+    try:
+        with open(config_path(), "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+    except Exception:
+        pass
+
+def wait_for_bossa_port(timeout=5.0) -> str | None:
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        for p in serial.tools.list_ports.comports():
+            if "bossa" in (p.description or "").lower():
+                return p.device
+        time.sleep(0.2)
+    return None
+
+def kick_bootloader_1200(port: str):
+    try:
+        s = serial.Serial(port=port, baudrate=1200, timeout=0.2)
+        try:
+            s.dtr = False; time.sleep(0.05); s.dtr = True; time.sleep(0.05)
+        except Exception:
+            pass
+        s.close()
+    except Exception:
+        pass
+
+def to_windows_bossac_port(port: str) -> str:
+    try:
+        n = int(port.replace("COM", ""))
+        return port if n < 10 else r"\\.\%s" % port
+    except Exception:
+        return port
+
 class MainWindow(QtWidgets.QMainWindow):
+    flashProgress = QtCore.Signal(int)
+    flashLogLine  = QtCore.Signal(str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Mouse forwarder - Fizo")
-        self.setMinimumSize(520, 260)
+        self.setMinimumSize(720, 440)
         self.statusBar()
+
+        self.cfg = load_config()
+        self._bossac_path = self.cfg.get("bossac_path") if self.cfg else None
 
         self.sender = SerialSender()
         self.sender.connectedChanged.connect(self.on_connected_changed)
@@ -198,47 +256,64 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
         layout = QtWidgets.QVBoxLayout(central)
 
-        g1 = QtWidgets.QGroupBox("Arduino (programming port) connection")
+        g1 = QtWidgets.QGroupBox("Arduino connection")
         l1 = QtWidgets.QGridLayout(g1)
         self.portCombo = QtWidgets.QComboBox()
         self.refreshBtn = QtWidgets.QPushButton("Refresh")
         self.connectBtn = QtWidgets.QPushButton("Connect")
         self.connectBtn.setCheckable(True)
         self.connectBtn.setEnabled(False)
+        self.flashBtn = QtWidgets.QPushButton("Flash…")
         self.statusLbl = QtWidgets.QLabel("Disconnected")
         l1.addWidget(QtWidgets.QLabel("COM Port:"), 0, 0)
         l1.addWidget(self.portCombo, 0, 1)
         l1.addWidget(self.refreshBtn, 0, 2)
         l1.addWidget(self.connectBtn, 1, 1)
-        l1.addWidget(self.statusLbl, 1, 2, alignment=QtCore.Qt.AlignRight)
+        l1.addWidget(self.flashBtn, 1, 2)
+        l1.addWidget(self.statusLbl, 1, 3, alignment=QtCore.Qt.AlignRight)
 
         g2 = QtWidgets.QGroupBox("Mouse forwarding")
         l2 = QtWidgets.QGridLayout(g2)
-        self.toggleBtn = QtWidgets.QPushButton("Start Forwarding")
+        self.toggleBtn = QtWidgets.QPushButton("Start forwarding")
         self.toggleBtn.setCheckable(True)
         self.rateLbl = QtWidgets.QLabel("0 pkts/s")
         l2.addWidget(self.toggleBtn, 0, 0)
         l2.addWidget(self.rateLbl, 0, 1, alignment=QtCore.Qt.AlignRight)
 
+        g3 = QtWidgets.QGroupBox("Status")
+        l3 = QtWidgets.QVBoxLayout(g3)
+        self.progress = QtWidgets.QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.log = QtWidgets.QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(3000)
+        l3.addWidget(self.progress)
+        l3.addWidget(self.log)
+
         tips = QtWidgets.QLabel(
             "Wiring:\n"
-            "• Programming port → this PC (serial control)\n"
-            "• Native USB Port → second PC (HID mouse)\n"
-            "Flash the provided Arduino sketch first."
+            "• Programming port → this PC (serial)\n"
+            "• Native USB port → second PC (HID mouse)\n"
         )
         tips.setStyleSheet("color:#a9b1c7;")
         tips.setWordWrap(True)
 
         layout.addWidget(g1)
         layout.addWidget(g2)
+        layout.addWidget(g3)
         layout.addWidget(tips)
 
         self.refreshBtn.clicked.connect(self.fill_ports)
         self.connectBtn.toggled.connect(self.on_connect_toggled)
         self.toggleBtn.toggled.connect(self.on_toggle_forwarding)
+        self.flashBtn.clicked.connect(self.on_flash_clicked)
 
         self.forwarding = False
         self.filter = None
+
+        self.flashProgress.connect(self._on_flash_progress)
+        self.flashLogLine.connect(self._on_flash_log)
 
         self.fill_ports()
 
@@ -247,14 +322,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.portCombo.clear()
         items = []
         for p in serial.tools.list_ports.comports():
-            label = f"{p.device} — {p.description}"
-            items.append((label, p.device))
-        items.sort(key=lambda x: ("arduino" not in x[0].lower(), x[0].lower()))
-        for label, dev in items:
+            items.append((f"{p.device} — {p.description}", p.device, p.description or ""))
+        items.sort(key=lambda x: ("arduino" not in x[0].lower() and "bossa" not in x[0].lower(), x[0].lower()))
+        for label, dev, _desc in items:
             self.portCombo.addItem(label, dev)
             if dev == current:
-                idx = self.portCombo.count() - 1
-                self.portCombo.setCurrentIndex(idx)
+                self.portCombo.setCurrentIndex(self.portCombo.count() - 1)
         if not items:
             self.portCombo.addItem("No ports found", None)
         self.connectBtn.setEnabled(bool(items))
@@ -266,12 +339,10 @@ class MainWindow(QtWidgets.QMainWindow):
             ok = self.sender.open(port, 1000000) if port else False
             if not ok:
                 self.statusLbl.setText("Failed")
-                self.connectBtn.blockSignals(True)
-                self.connectBtn.setChecked(False)
-                self.connectBtn.blockSignals(False)
+                self.connectBtn.blockSignals(True); self.connectBtn.setChecked(False); self.connectBtn.blockSignals(False)
                 self.connectBtn.setText("Connect")
                 return
-            self.statusLbl.setText(f"Connected @ 1,000,000")
+            self.statusLbl.setText("Connected @ 1,000,000")
             self.connectBtn.setText("Disconnect")
         else:
             self.sender.close()
@@ -305,6 +376,191 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_stats(self, pps:int):
         self.rateLbl.setText(f"{pps} pkts/s")
+
+    def locate_bossac(self) -> str | None:
+        if self._bossac_path and os.path.isfile(self._bossac_path):
+            return self._bossac_path
+        p = shutil.which("bossac") or shutil.which("bossac.exe")
+        if p and os.path.isfile(p):
+            self._bossac_path = p
+            self.cfg["bossac_path"] = p
+            save_config(self.cfg)
+            return p
+        resp = QtWidgets.QMessageBox.question(
+            self, "Get bossac?", "bossac.exe not found.\n\nDownload the official portable build now ?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+        )
+        if resp == QtWidgets.QMessageBox.Yes:
+            p = self._auto_download_bossac()
+            if p:
+                self._bossac_path = p
+                self.cfg["bossac_path"] = p
+                save_config(self.cfg)
+                return p
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Locate bossac.exe", "", "bossac (bossac.exe)")
+        if path:
+            self._bossac_path = path
+            self.cfg["bossac_path"] = path
+            save_config(self.cfg)
+            return path
+        return None
+
+    def _auto_download_bossac(self) -> str | None:
+        out_dir = os.path.join(tools_dir(), "bossac-1.9.1-arduino2")
+        os.makedirs(out_dir, exist_ok=True)
+        tar_path = os.path.join(out_dir, "bossac-1.9.1-arduino2-windows.tar.gz")
+        exe_path = os.path.join(out_dir, "bossac.exe")
+
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.log.appendPlainText(f"Downloading bossac from:\n{BOSSAC_URL}")
+
+        done_evt = threading.Event()
+        result = {"ok": False, "exe": None, "err": None}
+
+        def worker():
+            try:
+                with urllib.request.urlopen(BOSSAC_URL) as r:
+                    total = int(r.headers.get("Content-Length", "0")) or 0
+                    got = 0
+                    with open(tar_path, "wb") as f:
+                        while True:
+                            chunk = r.read(1024 * 64)
+                            if not chunk: break
+                            f.write(chunk)
+                            got += len(chunk)
+                            if total:
+                                pct = max(0, min(100, int(got * 100 / total)))
+                                QtCore.QMetaObject.invokeMethod(self, "flashProgress", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(int, pct))
+                QtCore.QMetaObject.invokeMethod(self, "flashLogLine", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, "Download complete. Extracting…"))
+
+                found = None
+                with tarfile.open(tar_path, "r:gz") as tf:
+                    for m in tf.getmembers():
+                        name = m.name.replace("\\", "/").lower()
+                        if name.endswith("/bossac.exe") or name.endswith("bossac.exe"):
+                            tf.extract(m, out_dir)
+                            extracted = os.path.join(out_dir, m.name)
+                            base = os.path.join(out_dir, "bossac.exe")
+                            try:
+                                if os.path.abspath(extracted) != os.path.abspath(base):
+                                    shutil.move(extracted, base)
+                            except Exception:
+                                pass
+                            found = base
+                            break
+                if not found or not os.path.isfile(exe_path):
+                    raise RuntimeError("bossac.exe not found in archive")
+
+                result["ok"] = True
+                result["exe"] = exe_path
+            except Exception as e:
+                result["ok"] = False
+                result["err"] = str(e)
+            finally:
+                done_evt.set()
+
+        threading.Thread(target=worker, daemon=True).start()
+        while not done_evt.is_set():
+            QtWidgets.QApplication.processEvents()
+            time.sleep(0.02)
+
+        if result["ok"]:
+            self.flashProgress.emit(100)
+            self.log.appendPlainText(f"bossac ready: {result['exe']}")
+            return result["exe"]
+        else:
+            self.log.appendPlainText(f"Auto-download failed: {result['err']}")
+            return None
+
+    def on_flash_clicked(self):
+        bin_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select compiled .bin", "", "Binary (*.bin)")
+        if not bin_path:
+            return
+
+        bossac = self.locate_bossac()
+        if not bossac:
+            QtWidgets.QMessageBox.warning(self, "bossac not found", "bossac.exe is required for flashing.")
+            return
+
+        self.progress.setValue(0)
+        self.log.clear()
+        self.statusBar().showMessage("Preparing bootloader…")
+
+        selected_port = self.portCombo.currentData()
+        if selected_port:
+            kick_bootloader_1200(selected_port)
+
+        bossa_port = wait_for_bossa_port(timeout=5.0) or selected_port
+        if not bossa_port:
+            QtWidgets.QMessageBox.warning(self, "No port", "No serial port selected and Bossa Program Port not found.")
+            return
+
+        bossaport_arg = to_windows_bossac_port(bossa_port)
+        args = [
+            bossac,
+            "-i", "-d",
+            f"--port={bossaport_arg}",
+            "-U", "true",
+            "-e", "-w", "-v",
+            bin_path,
+            "-R"
+        ]
+
+        self.setEnabled(False)
+        self.statusBar().showMessage(f"Flashing on {bossa_port}…")
+
+        def run_bossac():
+            ok = False
+            try:
+                proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                for line in proc.stdout:
+                    line = line.rstrip("\r\n")
+                    QtCore.QMetaObject.invokeMethod(self, "flashLogLine", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, line))
+                    m = re.search(r'(\d{1,3})\s*%', line)
+                    if m:
+                        pct = max(0, min(100, int(m.group(1))))
+                        QtCore.QMetaObject.invokeMethod(self, "flashProgress", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(int, pct))
+                    else:
+                        m2 = re.search(r'\((\d+)\s*/\s*(\d+)\s*pages?\)', line, re.IGNORECASE)
+                        if m2:
+                            cur, total = int(m2.group(1)), max(1, int(m2.group(2)))
+                            pct = int((cur / total) * 100)
+                            QtCore.QMetaObject.invokeMethod(self, "flashProgress", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(int, pct))
+                proc.wait()
+                ok = (proc.returncode == 0)
+            except Exception as e:
+                QtCore.QMetaObject.invokeMethod(self, "flashLogLine", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, f"Error: {e}"))
+                ok = False
+            finally:
+                if ok:
+                    QtCore.QMetaObject.invokeMethod(self, "flashProgress", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(int, 100))
+                QtCore.QMetaObject.invokeMethod(self, "_flash_done",
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(bool, ok),
+                    QtCore.Q_ARG(str, bossa_port))
+
+        threading.Thread(target=run_bossac, daemon=True).start()
+
+    @QtCore.Slot(int)
+    def _on_flash_progress(self, pct:int):
+        self.progress.setRange(0, 100)
+        self.progress.setValue(pct)
+
+    @QtCore.Slot(str)
+    def _on_flash_log(self, line:str):
+        self.log.appendPlainText(line)
+
+    @QtCore.Slot(bool, str)
+    def _flash_done(self, ok:bool, port_used:str):
+        self.setEnabled(True)
+        self.fill_ports()
+        if ok:
+            self.statusBar().showMessage(f"Flash OK on {port_used}", 5000)
+            QtWidgets.QMessageBox.information(self, "Flash complete", "Upload finished successfully.")
+        else:
+            self.statusBar().showMessage("Flash failed", 5000)
+            QtWidgets.QMessageBox.critical(self, "Flash FAILED", "bossac returned an error. See the log for details.")
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
