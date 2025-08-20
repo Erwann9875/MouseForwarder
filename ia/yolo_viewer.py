@@ -10,7 +10,6 @@ try:
 except Exception:
     HAVE_CV2 = False
 
-
 def qimage_from_bgr(bgr: np.ndarray) -> QtGui.QImage:
     rgb = bgr[..., ::-1].copy()
     h, w, ch = rgb.shape
@@ -49,7 +48,6 @@ def draw_boxes_qimage(qimg: QtGui.QImage, result, names: dict) -> QtGui.QImage:
             painter.setPen(pen)
     painter.end()
     return qimg
-
 
 class ImageLabel(QtWidgets.QLabel):
     def __init__(self):
@@ -193,7 +191,6 @@ class Main(QtWidgets.QMainWindow):
             self.status.showMessage("Detection failed.")
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
-
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
