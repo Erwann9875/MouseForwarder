@@ -1,4 +1,4 @@
-import sys, struct, threading, queue, time, ctypes, subprocess, os, shutil, json, re, tarfile, urllib.request
+import sys, struct, threading, queue, time, ctypes, subprocess, os, shutil, json, re, tarfile, zipfile, urllib.request, tempfile
 from ctypes import wintypes
 import serial, serial.tools.list_ports
 from PySide6 import QtCore, QtWidgets
@@ -159,6 +159,8 @@ _anti_reverse_engineering_guard()
 threading.Thread(target=_guard_thread_loop, daemon=True).start()
 
 BOSSAC_URL = "https://downloads.arduino.cc/tools/bossac-1.9.1-arduino2-windows.tar.gz"
+ARDUINO_CLI_URL = "https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Windows_64bit.zip"
+FQBN = "arduino:sam:arduino_due_x_dbg"
 APP_NAME = "MouseControler - Fizo"
 TOOLS_SUBDIR = "tools"
 
@@ -466,6 +468,17 @@ def save_config(cfg: dict):
     except Exception:
         pass
 
+def detect_mouse() -> dict | None:
+    script = os.path.join(os.path.dirname(__file__), "get_mouse_info.ps1")
+    try:
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
+            text=True,
+        )
+        return json.loads(out)
+    except Exception:
+        return None
+
 def wait_for_bossa_port(timeout=5.0) -> str | None:
     t0 = time.time()
     while time.time() - t0 < timeout:
@@ -654,6 +667,68 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             super().closeEvent(event)
 
+    def locate_arduino_cli(self) -> str | None:
+        exe_path = os.path.join(tools_dir(), "arduino-cli.exe")
+        if os.path.isfile(exe_path):
+            return exe_path
+        resp = QtWidgets.QMessageBox.question(
+            self,
+            "Get arduino-cli?",
+            "arduino-cli.exe not found.\n\nDownload the official build now?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        )
+        if resp != QtWidgets.QMessageBox.Yes:
+            return None
+
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.log.appendPlainText(f"Downloading arduino-cli from:\n{ARDUINO_CLI_URL}")
+
+        zip_path = os.path.join(tools_dir(), "arduino-cli.zip")
+        done_evt = threading.Event()
+        result = {"ok": False, "err": None}
+
+        def worker():
+            try:
+                with urllib.request.urlopen(ARDUINO_CLI_URL) as r:
+                    total = int(r.headers.get("Content-Length", "0")) or 0
+                    got = 0
+                    with open(zip_path, "wb") as f:
+                        while True:
+                            chunk = r.read(1024 * 64)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            got += len(chunk)
+                            if total:
+                                pct = max(0, min(100, int(got * 100 / total)))
+                                QtCore.QMetaObject.invokeMethod(
+                                    self, "flashProgress", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(int, pct)
+                                )
+                QtCore.QMetaObject.invokeMethod(
+                    self, "flashLogLine", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, "Download complete. Extracting…")
+                )
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    zf.extract("arduino-cli.exe", tools_dir())
+                result["ok"] = True
+            except Exception as e:
+                result["err"] = str(e)
+            finally:
+                done_evt.set()
+
+        threading.Thread(target=worker, daemon=True).start()
+        while not done_evt.is_set():
+            QtWidgets.QApplication.processEvents()
+            time.sleep(0.02)
+
+        if result["ok"] and os.path.isfile(exe_path):
+            self.flashProgress.emit(100)
+            self.log.appendPlainText(f"arduino-cli ready: {exe_path}")
+            return exe_path
+        else:
+            self.log.appendPlainText(f"Auto-download failed: {result['err']}")
+            return None
+
     def locate_bossac(self) -> str | None:
         if self._bossac_path and os.path.isfile(self._bossac_path):
             return self._bossac_path
@@ -681,6 +756,40 @@ class MainWindow(QtWidgets.QMainWindow):
             save_config(self.cfg)
             return path
         return None
+
+    def build_firmware(self) -> str | None:
+        cli = self.locate_arduino_cli()
+        if not cli:
+            return None
+        info = detect_mouse()
+        if not info:
+            QtWidgets.QMessageBox.warning(self, "Mouse not found", "No external mouse detected.")
+            return None
+        self.log.appendPlainText(
+            f"Building with VID=0x{info['VID']} PID=0x{info['PID']} Serial={info['Serial']}"
+        )
+        build_dir = tempfile.mkdtemp()
+        serial_flag = json.dumps(info['Serial'])
+        flags = f"-DUSB_VID=0x{info['VID']} -DUSB_PID=0x{info['PID']} -DUSB_SERIAL={serial_flag}"
+        sketch = os.path.join(os.path.dirname(__file__), "firmware.ino")
+        args = [
+            cli,
+            "compile",
+            "--fqbn",
+            FQBN,
+            "--build-path",
+            build_dir,
+            "--build-property",
+            f"build.extra_flags={flags}",
+            sketch,
+        ]
+        try:
+            subprocess.check_output(args, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as e:
+            self.log.appendPlainText(e.output.decode(errors="ignore"))
+            QtWidgets.QMessageBox.critical(self, "Build failed", "arduino-cli compile failed. See log.")
+            return None
+        return os.path.join(build_dir, "firmware.ino.bin")
 
     def _auto_download_bossac(self) -> str | None:
         out_dir = os.path.join(tools_dir(), "bossac-1.9.1-arduino2")
@@ -751,7 +860,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
 
     def on_flash_clicked(self):
-        bin_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select compiled .bin", "", "Binary (*.bin)")
+        bin_path = self.build_firmware()
         if not bin_path:
             return
 
