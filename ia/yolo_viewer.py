@@ -18,14 +18,54 @@ def qimage_from_bgr(bgr: np.ndarray) -> QtGui.QImage:
     return qimg.copy()
 
 def draw_boxes_qimage(qimg: QtGui.QImage, result, names: dict) -> QtGui.QImage:
-    qimg = qimg.copy()
-    painter = QtGui.QPainter(qimg)
-    pen = QtGui.QPen(QtGui.QColor("#2e8bff"))
-    pen.setWidth(2)
-    painter.setPen(pen)
-    font = painter.font()
-    font.setPointSize(10)
-    painter.setFont(font)
+    out = qimg.copy()
+    painter = QtGui.QPainter(out)
+    pen_box = QtGui.QPen(QtGui.QColor("#2e8bff")); pen_box.setWidth(2)
+    painter.setPen(pen_box)
+    font = painter.font(); font.setPointSize(10); painter.setFont(font)
+    metrics = QtGui.QFontMetrics(font)
+
+    W, H = out.width(), out.height()
+    pad = 2
+    occupied: list[QtCore.QRectF] = []
+
+    def clamp_rect(x, y, w, h):
+        x = max(0.0, min(float(W - w), float(x)))
+        y = max(0.0, min(float(H - h), float(y)))
+        return QtCore.QRectF(x, y, float(w), float(h))
+
+    def inter_area(a: QtCore.QRectF, b: QtCore.QRectF) -> float:
+        ix1 = max(a.left(),  b.left())
+        iy1 = max(a.top(),   b.top())
+        ix2 = min(a.right(), b.right())
+        iy2 = min(a.bottom(),b.bottom())
+        return max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+
+    def place_label(x1, y1, x2, y2, tw, th) -> QtCore.QRectF:
+        cx = (x1 + x2) * 0.5
+        candidates = [
+            (x1, y1 - th - pad),
+            (x2 - tw, y1 - th - pad),
+            (cx - tw/2, y1 - th - pad),
+            (x1, y2 + pad),
+            (x2 - tw, y2 + pad),
+            (cx - tw/2, y2 + pad),
+            (x1 - tw - pad, (y1 + y2 - th)/2),
+            (x2 + pad, (y1 + y2 - th)/2),
+        ]
+
+        best_rect = None
+        best_overlap = float("inf")
+
+        for (px, py) in candidates:
+            r = clamp_rect(px, py, tw, th)
+            if all(r.intersects(o) is False for o in occupied):
+                return r
+            overlap = sum(inter_area(r, o) for o in occupied)
+            if overlap < best_overlap:
+                best_overlap, best_rect = overlap, r
+
+        return best_rect if best_rect is not None else clamp_rect(x1, max(0, y1 - th - pad), tw, th)
 
     boxes = result.boxes
     if boxes is not None and len(boxes) > 0:
@@ -33,21 +73,32 @@ def draw_boxes_qimage(qimg: QtGui.QImage, result, names: dict) -> QtGui.QImage:
         cls  = boxes.cls.cpu().numpy().astype(int) if boxes.cls is not None else None
         conf = boxes.conf.cpu().numpy() if boxes.conf is not None else None
 
-        for i, (x1, y1, x2, y2) in enumerate(xyxy):
-            painter.drawRect(QtCore.QRectF(float(x1), float(y1), float(x2 - x1), float(y2 - y1)))
+        order = np.argsort(xyxy[:,1])
+        for i in order:
+            x1, y1, x2, y2 = [float(v) for v in xyxy[i]]
+
+            painter.setPen(pen_box)
+            painter.drawRect(QtCore.QRectF(x1, y1, x2 - x1, y2 - y1))
+
             label = names.get(cls[i], str(cls[i])) if cls is not None else "obj"
             if conf is not None:
                 label = f"{label} {conf[i]:.2f}"
-            metrics = QtGui.QFontMetrics(font)
-            tw = metrics.horizontalAdvance(label) + 8
-            th = metrics.height() + 4
-            bg_rect = QtCore.QRectF(float(x1), float(max(0, y1 - th)), float(tw), float(th))
-            painter.fillRect(bg_rect, QtGui.QColor(0, 0, 0, 180))
+            tw = metrics.horizontalAdvance(label) + 10
+            th = metrics.height() + 6
+
+            bg = place_label(x1, y1, x2, y2, tw, th)
+            occupied.append(bg)
+
+            painter.fillRect(bg, QtGui.QColor(0, 0, 0, 190))
             painter.setPen(QtGui.QPen(QtCore.Qt.white))
-            painter.drawText(bg_rect.adjusted(4, 0, -2, -2), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, label)
-            painter.setPen(pen)
+            painter.drawText(bg.adjusted(5, 0, -3, -2),
+                             QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft,
+                             label)
+
+            painter.setPen(pen_box)
+
     painter.end()
-    return qimg
+    return out
 
 class ImageLabel(QtWidgets.QLabel):
     def __init__(self):
@@ -177,11 +228,7 @@ class Main(QtWidgets.QMainWindow):
                 verbose=False
             )
             r = results[0]
-            if HAVE_CV2:
-                bgr = r.plot()
-                qimg = qimage_from_bgr(bgr)
-            else:
-                qimg = draw_boxes_qimage(self.current_qimg, r, self.model.names)
+            qimg = draw_boxes_qimage(self.current_qimg, r, self.model.names)
             self.view.set_qimage(qimg)
             self.status.showMessage(
                 f"Done. {len(r.boxes) if r.boxes is not None else 0} objects — classes: {self.model.names}"
