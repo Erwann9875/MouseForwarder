@@ -1072,11 +1072,12 @@ class MainWindow(QtWidgets.QMainWindow):
             args = [
                 bossac,
                 "-i", "-d",
-                f"--port={bossaport_arg}",
-                "-U", "true",
+                "-p", bossaport_arg,
+                "--unlock=false",
                 "-e", "-w", "-v",
+                "-b",
                 bin_path,
-                "-R"
+                "-R",
             ]
 
             self.setEnabled(False)
