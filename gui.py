@@ -886,9 +886,30 @@ class MainWindow(QtWidgets.QMainWindow):
             return path
         return None
 
+    def _ensure_core_installed(self, cli:str, fqbn:str)->bool:
+        core = ":".join(fqbn.split(":")[:2])
+        try:
+            out = subprocess.check_output([cli, "core", "list"], text=True, stderr=subprocess.STDOUT)
+            if core in out:
+                return True
+        except Exception:
+            pass
+        try:
+            self.log.appendPlainText(f"Installing core {core}…")
+            subprocess.check_call([cli, "core", "update-index"], stderr=subprocess.STDOUT)
+            subprocess.check_call([cli, "core", "install", core], stderr=subprocess.STDOUT)
+            return True
+        except subprocess.CalledProcessError as e:
+            self.log.appendPlainText(f"Core install failed: {e}")
+            QtWidgets.QMessageBox.critical(self, "Core install failed", f"Could not install {core}. See log.")
+            return False
+
     def build_firmware(self) -> str | None:
         cli = self.locate_arduino_cli()
         if not cli:
+            return None
+        board = self.boardCombo.currentData()
+        if not self._ensure_core_installed(cli, board["fqbn"]):
             return None
         build_dir = tempfile.mkdtemp()
         sketch = os.path.join(os.path.dirname(__file__), "ControlMouse.ino")
