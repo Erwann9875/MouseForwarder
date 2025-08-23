@@ -521,17 +521,6 @@ def save_config(cfg: dict):
     except Exception:
         pass
 
-def detect_mouse() -> dict | None:
-    script = os.path.join(os.path.dirname(__file__), "get_mouse_info.ps1")
-    try:
-        out = subprocess.check_output(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
-            text=True,
-        )
-        return json.loads(out)
-    except Exception:
-        return None
-
 def wait_for_bossa_port(timeout=5.0) -> str | None:
     t0 = time.time()
     while time.time() - t0 < timeout:
@@ -874,16 +863,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cli = self.locate_arduino_cli()
         if not cli:
             return None
-        info = detect_mouse()
-        if not info:
-            QtWidgets.QMessageBox.warning(self, "Mouse not found", "No external mouse detected.")
-            return None
-        self.log.appendPlainText(
-            f"Building with VID=0x{info['VID']} PID=0x{info['PID']} Serial={info['Serial']}"
-        )
         build_dir = tempfile.mkdtemp()
-        serial_flag = json.dumps(info['Serial'])
-        flags = f"-DUSB_VID=0x{info['VID']} -DUSB_PID=0x{info['PID']} -DUSB_SERIAL={serial_flag}"
         sketch = os.path.join(os.path.dirname(__file__), "firmware.ino")
         args = [
             cli,
