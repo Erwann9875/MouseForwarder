@@ -796,6 +796,30 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             super().closeEvent(event)
 
+    def _run_cli(self, args: list[str]) -> bool:
+        try:
+            proc = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    if proc.poll() is not None:
+                        break
+                    QtWidgets.QApplication.processEvents()
+                    time.sleep(0.01)
+                    continue
+                self.log.appendPlainText(line.rstrip("\r\n"))
+                QtWidgets.QApplication.processEvents()
+            return proc.returncode == 0
+        except Exception as e:
+            self.log.appendPlainText(f"Error: {e}")
+            return False
+
     def locate_arduino_cli(self) -> str | None:
         exe_path = os.path.join(tools_dir(), "arduino-cli.exe")
         if os.path.isfile(exe_path):
@@ -896,10 +920,12 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         try:
             self.log.appendPlainText(f"Installing core {core}…")
-            subprocess.check_call([cli, "core", "update-index"], stderr=subprocess.STDOUT)
-            subprocess.check_call([cli, "core", "install", core], stderr=subprocess.STDOUT)
+            if not self._run_cli([cli, "core", "update-index"]):
+                raise RuntimeError("core update-index failed")
+            if not self._run_cli([cli, "core", "install", core]):
+                raise RuntimeError("core install failed")
             return True
-        except subprocess.CalledProcessError as e:
+        except Exception as e:
             self.log.appendPlainText(f"Core install failed: {e}")
             QtWidgets.QMessageBox.critical(self, "Core install failed", f"Could not install {core}. See log.")
             return False
@@ -923,9 +949,8 @@ class MainWindow(QtWidgets.QMainWindow):
             build_dir,
             sketch,
         ]
-        try:
-            subprocess.check_output(args, stderr=subprocess.STDOUT)
-        except subprocess.CalledProcessError as e:
+        self.log.appendPlainText("Compiling sketch…")
+        if not self._run_cli(args):
             self.log.appendPlainText(e.output.decode(errors="ignore"))
             QtWidgets.QMessageBox.critical(self, "Build failed", "arduino-cli compile failed. See log.")
             return None
