@@ -158,6 +158,7 @@ _hide_from_debugger()
 _anti_reverse_engineering_guard()
 threading.Thread(target=_guard_thread_loop, daemon=True).start()
 
+DEFAULT_BLOCKED = {"left", "right"}
 BOSSAC_URL = "https://downloads.arduino.cc/tools/bossac-1.9.1-arduino2-windows.tar.gz"
 ARDUINO_CLI_URL = "https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Windows_64bit.zip"
 FQBN = "arduino:sam:arduino_due_x_dbg"
@@ -173,6 +174,23 @@ WH_MOUSE_LL = 14
 WH_KEYBOARD_LL = 13
 WM_KEYDOWN = 0x0100
 VK_ESCAPE = 0x1B
+WM_MOUSEMOVE = 0x0200
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+WM_LBUTTONDBLCLK = 0x0203
+WM_RBUTTONDOWN = 0x0204
+WM_RBUTTONUP = 0x0205
+WM_RBUTTONDBLCLK = 0x0206
+WM_MBUTTONDOWN = 0x0207
+WM_MBUTTONUP = 0x0208
+WM_MBUTTONDBLCLK = 0x0209
+WM_MOUSEWHEEL = 0x020A
+WM_XBUTTONDOWN = 0x020B
+WM_XBUTTONUP = 0x020C
+WM_XBUTTONDBLCLK = 0x020D
+WM_MOUSEHWHEEL = 0x020E
+XBUTTON1 = 0x0001
+XBUTTON2 = 0x0002
 
 try:
     HRAWINPUT = wintypes.HRAWINPUT
@@ -226,6 +244,16 @@ class KBDLLHOOKSTRUCT(ctypes.Structure):
         ('time', wintypes.DWORD),
         ('dwExtraInfo', ctypes.c_void_p),
     ]
+class POINT(ctypes.Structure):
+    _fields_ = [('x', wintypes.LONG), ('y', wintypes.LONG)]
+class MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ('pt', POINT),
+        ('mouseData', wintypes.DWORD),
+        ('flags', wintypes.DWORD),
+        ('time', wintypes.DWORD),
+        ('dwExtraInfo', ctypes.c_void_p),
+    ]
 
 GetRawInputData = user32.GetRawInputData
 GetRawInputData.restype = UINT
@@ -260,6 +288,12 @@ class MouseBlocker:
     def __init__(self):
         self._hook = None
         self._proc = None
+        self._blocked = {
+            'left', 'right', 'middle', 'back', 'forward', 'wheel'
+        }
+
+    def set_blocked(self, buttons:set[str]):
+        self._blocked = set(buttons)
 
     def start(self):
         if self._hook:
@@ -267,7 +301,11 @@ class MouseBlocker:
 
         def _callback(nCode, wParam, lParam):
             if nCode >= 0:
-                return 1
+                if wParam == WM_MOUSEMOVE:
+                    return 1
+                btn = self._wparam_to_button(wParam, lParam)
+                if btn and btn in self._blocked:
+                    return 1
             return CallNextHookEx(self._hook, nCode, wParam, lParam)
 
         self._proc = HOOKPROC(_callback)
@@ -281,6 +319,21 @@ class MouseBlocker:
             UnhookWindowsHookEx(self._hook)
             self._hook = None
             self._proc = None
+
+    def _wparam_to_button(self, wParam, lParam):
+        if wParam in (WM_LBUTTONDOWN, WM_LBUTTONUP, WM_LBUTTONDBLCLK):
+            return 'left'
+        if wParam in (WM_RBUTTONDOWN, WM_RBUTTONUP, WM_RBUTTONDBLCLK):
+            return 'right'
+        if wParam in (WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MBUTTONDBLCLK):
+            return 'middle'
+        if wParam in (WM_XBUTTONDOWN, WM_XBUTTONUP, WM_XBUTTONDBLCLK):
+            info = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+            btn = (info.mouseData >> 16) & 0xffff
+            return 'forward' if btn == XBUTTON2 else 'back'
+        if wParam in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):
+            return 'wheel'
+        return None
 
 class EscapeListener:
     def __init__(self, on_escape):
@@ -551,6 +604,32 @@ class MainWindow(QtWidgets.QMainWindow):
         l2.addWidget(self.toggleBtn, 0, 0)
         l2.addWidget(self.rateLbl, 0, 1, alignment=QtCore.Qt.AlignRight)
 
+        btnLayout = QtWidgets.QHBoxLayout()
+        self.blockLeft = QtWidgets.QCheckBox("Left")
+        self.blockRight = QtWidgets.QCheckBox("Right")
+        self.blockMiddle = QtWidgets.QCheckBox("Middle")
+        self.blockBack = QtWidgets.QCheckBox("Back")
+        self.blockForward = QtWidgets.QCheckBox("Forward")
+        self.blockWheel = QtWidgets.QCheckBox("Wheel")
+        for cb in (
+            self.blockLeft,
+            self.blockRight,
+            self.blockMiddle,
+            self.blockBack,
+            self.blockForward,
+            self.blockWheel,
+        ):
+            btnLayout.addWidget(cb)
+        l2.addLayout(btnLayout, 1, 0, 1, 2)
+
+        blocked = self.cfg.get("blocked_buttons", DEFAULT_BLOCKED)
+        self.blockLeft.setChecked("left" in blocked)
+        self.blockRight.setChecked("right" in blocked)
+        self.blockMiddle.setChecked("middle" in blocked)
+        self.blockBack.setChecked("back" in blocked)
+        self.blockForward.setChecked("forward" in blocked)
+        self.blockWheel.setChecked("wheel" in blocked)
+
         g3 = QtWidgets.QGroupBox("Status")
         l3 = QtWidgets.QVBoxLayout(g3)
         self.progress = QtWidgets.QProgressBar()
@@ -575,15 +654,27 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(g3)
         layout.addWidget(tips)
 
+        self.blocker = MouseBlocker()
+        self.blocker.set_blocked(self._blocked_buttons())
+        self.escape = EscapeListener(self._on_escape)
+
         self.refreshBtn.clicked.connect(self.fill_ports)
         self.connectBtn.toggled.connect(self.on_connect_toggled)
         self.toggleBtn.toggled.connect(self.on_toggle_forwarding)
         self.flashBtn.clicked.connect(self.on_flash_clicked)
 
+        for cb in (
+            self.blockLeft,
+            self.blockRight,
+            self.blockMiddle,
+            self.blockBack,
+            self.blockForward,
+            self.blockWheel,
+        ):
+            cb.stateChanged.connect(self._on_block_boxes_changed)
+
         self.forwarding = False
         self.filter = None
-        self.blocker = MouseBlocker()
-        self.escape = EscapeListener(self._on_escape)
 
         self.flashProgress.connect(self._on_flash_progress)
         self.flashLogLine.connect(self._on_flash_log)
@@ -640,6 +731,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not self.filter:
                 self.filter = RawInputFilter(hwnd, self._on_delta)
                 app.installNativeEventFilter(self.filter)
+            app.installNativeEventFilter(self.filter)
             self.blocker.start()
             self.escape.start()
         else:
@@ -656,6 +748,27 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_delta(self, dx:int, dy:int):
         if self.forwarding and self.sender.ser:
             self.sender.send_delta(dx, dy)
+
+    def _blocked_buttons(self) -> set[str]:
+        buttons = set()
+        if self.blockLeft.isChecked():
+            buttons.add("left")
+        if self.blockRight.isChecked():
+            buttons.add("right")
+        if self.blockMiddle.isChecked():
+            buttons.add("middle")
+        if self.blockBack.isChecked():
+            buttons.add("back")
+        if self.blockForward.isChecked():
+            buttons.add("forward")
+        if self.blockWheel.isChecked():
+            buttons.add("wheel")
+        return buttons
+
+    def _on_block_boxes_changed(self):
+        self.blocker.set_blocked(self._blocked_buttons())
+        self.cfg["blocked_buttons"] = list(self._blocked_buttons())
+        save_config(self.cfg)
 
     def on_stats(self, pps:int):
         self.rateLbl.setText(f"{pps} pkts/s")
