@@ -161,7 +161,18 @@ threading.Thread(target=_guard_thread_loop, daemon=True).start()
 DEFAULT_BLOCKED = {"left", "right"}
 BOSSAC_URL = "https://downloads.arduino.cc/tools/bossac-1.9.1-arduino2-windows.tar.gz"
 ARDUINO_CLI_URL = "https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Windows_64bit.zip"
-FQBN = "arduino:sam:arduino_due_x_dbg"
+BOARDS = {
+    "Arduino due": {
+        "fqbn": "arduino:sam:arduino_due_x_dbg",
+        "flash": "bossac",
+        "ext": ".bin",
+    },
+    "Arduino leonardo": {
+        "fqbn": "arduino:avr:leonardo",
+        "flash": "arduino-cli",
+        "ext": ".hex",
+    },
+}
 APP_NAME = "MouseControler - Fizo"
 TOOLS_SUBDIR = "tools"
 
@@ -560,6 +571,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.cfg = load_config()
         self._bossac_path = self.cfg.get("bossac_path") if self.cfg else None
+        self._board_name = self.cfg.get("board", "Arduino Due")
 
         self.sender = SerialSender()
         self.sender.connectedChanged.connect(self.on_connected_changed)
@@ -571,6 +583,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         g1 = QtWidgets.QGroupBox("Arduino connection")
         l1 = QtWidgets.QGridLayout(g1)
+        self.boardCombo = QtWidgets.QComboBox()
+        for name, data in BOARDS.items():
+            self.boardCombo.addItem(name, data)
+        idx = self.boardCombo.findText(self._board_name)
+        if idx != -1:
+            self.boardCombo.setCurrentIndex(idx)
+        self.boardCombo.currentTextChanged.connect(self._on_board_changed)
         self.portCombo = QtWidgets.QComboBox()
         self.refreshBtn = QtWidgets.QPushButton("Refresh")
         self.connectBtn = QtWidgets.QPushButton("Connect")
@@ -578,12 +597,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connectBtn.setEnabled(False)
         self.flashBtn = QtWidgets.QPushButton("Flash…")
         self.statusLbl = QtWidgets.QLabel("Disconnected")
-        l1.addWidget(QtWidgets.QLabel("COM Port:"), 0, 0)
-        l1.addWidget(self.portCombo, 0, 1)
-        l1.addWidget(self.refreshBtn, 0, 2)
-        l1.addWidget(self.connectBtn, 1, 1)
-        l1.addWidget(self.flashBtn, 1, 2)
-        l1.addWidget(self.statusLbl, 1, 3, alignment=QtCore.Qt.AlignRight)
+
+        l1.addWidget(QtWidgets.QLabel("Board:"), 0, 0)
+        l1.addWidget(self.boardCombo, 0, 1, 1, 2)
+        l1.addWidget(QtWidgets.QLabel("COM Port:"), 1, 0)
+        l1.addWidget(self.portCombo, 1, 1)
+        l1.addWidget(self.refreshBtn, 1, 2)
+        l1.addWidget(self.connectBtn, 2, 1)
+        l1.addWidget(self.flashBtn, 2, 2)
+        l1.addWidget(self.statusLbl, 2, 3, alignment=QtCore.Qt.AlignRight)
 
         g2 = QtWidgets.QGroupBox("Mouse forwarding")
         l2 = QtWidgets.QGridLayout(g2)
@@ -759,6 +781,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cfg["blocked_buttons"] = list(self._blocked_buttons())
         save_config(self.cfg)
 
+    def _on_board_changed(self, name: str):
+        self._board_name = name
+        self.cfg["board"] = name
+        save_config(self.cfg)
+
     def on_stats(self, pps:int):
         self.rateLbl.setText(f"{pps} pkts/s")
 
@@ -864,16 +891,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if not cli:
             return None
         build_dir = tempfile.mkdtemp()
-        sketch = os.path.join(os.path.dirname(__file__), "firmware.ino")
+        sketch = os.path.join(os.path.dirname(__file__), "ControlMouse.ino")
+        board = self.boardCombo.currentData()
         args = [
             cli,
             "compile",
             "--fqbn",
-            FQBN,
+            board["fqbn"],
             "--build-path",
             build_dir,
-            "--build-property",
-            f"build.extra_flags={flags}",
             sketch,
         ]
         try:
@@ -882,7 +908,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log.appendPlainText(e.output.decode(errors="ignore"))
             QtWidgets.QMessageBox.critical(self, "Build failed", "arduino-cli compile failed. See log.")
             return None
-        return os.path.join(build_dir, "firmware.ino.bin")
+        return os.path.join(build_dir, f"ControlMouse.ino{board['ext']}")
 
     def _auto_download_bossac(self) -> str | None:
         out_dir = os.path.join(tools_dir(), "bossac-1.9.1-arduino2")
@@ -957,69 +983,113 @@ class MainWindow(QtWidgets.QMainWindow):
         if not bin_path:
             return
 
-        bossac = self.locate_bossac()
-        if not bossac:
-            QtWidgets.QMessageBox.warning(self, "bossac not found", "bossac.exe is required for flashing.")
-            return
+        board = self.boardCombo.currentData()
+        if board["flash"] == "bossac":
+            bossac = self.locate_bossac()
+            if not bossac:
+                QtWidgets.QMessageBox.warning(self, "bossac not found", "bossac.exe is required for flashing.")
+                return
 
-        self.progress.setValue(0)
-        self.log.clear()
-        self.statusBar().showMessage("Preparing bootloader…")
+            self.progress.setValue(0)
+            self.log.clear()
+            self.statusBar().showMessage("Preparing bootloader…")
 
-        selected_port = self.portCombo.currentData()
-        if selected_port:
-            kick_bootloader_1200(selected_port)
+            selected_port = self.portCombo.currentData()
+            if selected_port:
+                kick_bootloader_1200(selected_port)
 
-        bossa_port = wait_for_bossa_port(timeout=5.0) or selected_port
-        if not bossa_port:
-            QtWidgets.QMessageBox.warning(self, "No port", "No serial port selected and Bossa Program Port not found.")
-            return
+            bossa_port = wait_for_bossa_port(timeout=5.0) or selected_port
+            if not bossa_port:
+                QtWidgets.QMessageBox.warning(self, "No port", "No serial port selected and bossa program port not found.")
+                return
 
-        bossaport_arg = to_windows_bossac_port(bossa_port)
-        args = [
-            bossac,
-            "-i", "-d",
-            f"--port={bossaport_arg}",
-            "-U", "true",
-            "-e", "-w", "-v",
-            bin_path,
-            "-R"
-        ]
+            bossaport_arg = to_windows_bossac_port(bossa_port)
+            args = [
+                bossac,
+                "-i", "-d",
+                f"--port={bossaport_arg}",
+                "-U", "true",
+                "-e", "-w", "-v",
+                bin_path,
+                "-R"
+            ]
 
-        self.setEnabled(False)
-        self.statusBar().showMessage(f"Flashing on {bossa_port}…")
+            self.setEnabled(False)
+            self.statusBar().showMessage(f"Flashing on {bossa_port}…")
 
-        def run_bossac():
-            ok = False
-            try:
-                proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-                for line in proc.stdout:
-                    line = line.rstrip("\r\n")
-                    QtCore.QMetaObject.invokeMethod(self, "flashLogLine", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, line))
-                    m = re.search(r'(\d{1,3})\s*%', line)
-                    if m:
-                        pct = max(0, min(100, int(m.group(1))))
-                        QtCore.QMetaObject.invokeMethod(self, "flashProgress", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(int, pct))
-                    else:
-                        m2 = re.search(r'\((\d+)\s*/\s*(\d+)\s*pages?\)', line, re.IGNORECASE)
-                        if m2:
-                            cur, total = int(m2.group(1)), max(1, int(m2.group(2)))
-                            pct = int((cur / total) * 100)
-                            QtCore.QMetaObject.invokeMethod(self, "flashProgress", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(int, pct))
-                proc.wait()
-                ok = (proc.returncode == 0)
-            except Exception as e:
-                QtCore.QMetaObject.invokeMethod(self, "flashLogLine", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, f"Error: {e}"))
+            def run_bossac():
                 ok = False
-            finally:
-                if ok:
-                    QtCore.QMetaObject.invokeMethod(self, "flashProgress", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(int, 100))
-                QtCore.QMetaObject.invokeMethod(self, "_flash_done",
-                    QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(bool, ok),
-                    QtCore.Q_ARG(str, bossa_port))
+                try:
+                    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                    for line in proc.stdout:
+                        line = line.rstrip("\r\n")
+                        QtCore.QMetaObject.invokeMethod(self, "flashLogLine", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, line))
+                        m = re.search(r'(\d{1,3})\s*%', line)
+                        if m:
+                            pct = max(0, min(100, int(m.group(1))))
+                            QtCore.QMetaObject.invokeMethod(self, "flashProgress", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(int, pct))
+                        else:
+                            m2 = re.search(r'\((\d+)\s*/\s*(\d+)\s*pages?\)', line, re.IGNORECASE)
+                            if m2:
+                                cur, total = int(m2.group(1)), max(1, int(m2.group(2)))
+                                pct = int((cur / total) * 100)
+                                QtCore.QMetaObject.invokeMethod(self, "flashProgress", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(int, pct))
+                    proc.wait()
+                    ok = (proc.returncode == 0)
+                except Exception as e:
+                    QtCore.QMetaObject.invokeMethod(self, "flashLogLine", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, f"Error: {e}"))
+                    ok = False
+                finally:
+                    if ok:
+                        QtCore.QMetaObject.invokeMethod(self, "flashProgress", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(int, 100))
+                    QtCore.QMetaObject.invokeMethod(self, "_flash_done",
+                        QtCore.Qt.QueuedConnection,
+                        QtCore.Q_ARG(bool, ok),
+                        QtCore.Q_ARG(str, bossa_port))
 
-        threading.Thread(target=run_bossac, daemon=True).start()
+            threading.Thread(target=run_bossac, daemon=True).start()
+        else:
+            cli = self.locate_arduino_cli()
+            if not cli:
+                QtWidgets.QMessageBox.warning(self, "arduino-cli not found", "arduino-cli.exe is required for flashing.")
+                return
+            selected_port = self.portCombo.currentData()
+            if not selected_port:
+                QtWidgets.QMessageBox.warning(self, "No port", "No serial port selected.")
+                return
+            self.progress.setValue(0)
+            self.log.clear()
+            self.setEnabled(False)
+            self.statusBar().showMessage(f"Flashing on {selected_port}…")
+            args = [
+                cli,
+                "upload",
+                "--fqbn", board["fqbn"],
+                "--port", selected_port,
+                "--input-file", bin_path,
+            ]
+
+            def run_upload():
+                ok = False
+                try:
+                    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                    for line in proc.stdout:
+                        line = line.rstrip("\r\n")
+                        QtCore.QMetaObject.invokeMethod(self, "flashLogLine", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, line))
+                    proc.wait()
+                    ok = (proc.returncode == 0)
+                except Exception as e:
+                    QtCore.QMetaObject.invokeMethod(self, "flashLogLine", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, f"Error: {e}"))
+                    ok = False
+                finally:
+                    if ok:
+                        QtCore.QMetaObject.invokeMethod(self, "flashProgress", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(int, 100))
+                    QtCore.QMetaObject.invokeMethod(self, "_flash_done",
+                        QtCore.Qt.QueuedConnection,
+                        QtCore.Q_ARG(bool, ok),
+                        QtCore.Q_ARG(str, selected_port))
+
+            threading.Thread(target=run_upload, daemon=True).start()
 
     @QtCore.Slot(int)
     def _on_flash_progress(self, pct:int):
@@ -1039,7 +1109,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "Flash complete", "Upload finished successfully.")
         else:
             self.statusBar().showMessage("Flash failed", 5000)
-            QtWidgets.QMessageBox.critical(self, "Flash FAILED", "bossac returned an error. See the log for details.")
+            QtWidgets.QMessageBox.critical(self, "Flash FAILED", "Upload returned an error. See the log for details.")
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
