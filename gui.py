@@ -596,6 +596,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connectBtn.setCheckable(True)
         self.connectBtn.setEnabled(False)
         self.flashBtn = QtWidgets.QPushButton("Flash…")
+        self.clearBtn = QtWidgets.QPushButton("Clear packages")
         self.statusLbl = QtWidgets.QLabel("Disconnected")
 
         l1.addWidget(QtWidgets.QLabel("Board:"), 0, 0)
@@ -606,6 +607,7 @@ class MainWindow(QtWidgets.QMainWindow):
         l1.addWidget(self.connectBtn, 2, 1)
         l1.addWidget(self.flashBtn, 2, 2)
         l1.addWidget(self.statusLbl, 2, 3, alignment=QtCore.Qt.AlignRight)
+        l1.addWidget(self.clearBtn, 3, 1, 1, 2)
 
         g2 = QtWidgets.QGroupBox("Mouse forwarding")
         l2 = QtWidgets.QGridLayout(g2)
@@ -673,6 +675,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connectBtn.toggled.connect(self.on_connect_toggled)
         self.toggleBtn.toggled.connect(self.on_toggle_forwarding)
         self.flashBtn.clicked.connect(self.on_flash_clicked)
+        self.clearBtn.clicked.connect(self._on_clear_packages)
 
         for cb in (
             self.blockLeft,
@@ -922,6 +925,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log.appendPlainText(f"Installing core {core}…")
             if not self._run_cli([cli, "core", "update-index"]):
                 raise RuntimeError("core update-index failed")
+            if not self._run_cli([cli, "lib", "install", "Mouse"]):
+                raise RuntimeError("lib install Mouse failed")
             if not self._run_cli([cli, "core", "install", core]):
                 raise RuntimeError("core install failed")
             return True
@@ -929,6 +934,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log.appendPlainText(f"Core install failed: {e}")
             QtWidgets.QMessageBox.critical(self, "Core install failed", f"Could not install {core}. See log.")
             return False
+
+    def _on_clear_packages(self):
+        cli = self.locate_arduino_cli()
+        if not cli:
+            return
+        board = self.boardCombo.currentData()
+        core = ":".join(board["fqbn"].split(":")[:2])
+        self.log.appendPlainText("Removing library…")
+        self._run_cli([cli, "lib", "uninstall", "Mouse"])
+        self._run_cli([cli, "core", "uninstall", core])
 
     def build_firmware(self) -> str | None:
         cli = self.locate_arduino_cli()
