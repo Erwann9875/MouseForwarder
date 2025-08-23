@@ -950,8 +950,12 @@ class MainWindow(QtWidgets.QMainWindow):
             sketch,
         ]
         self.log.appendPlainText("Compiling sketch…")
-        if not self._run_cli(args):
-            self.log.appendPlainText(e.output.decode(errors="ignore"))
+        ok = False
+        try:
+            ok = self._run_cli(args)
+        except Exception as e:
+            self.log.appendPlainText(str(e))
+        if not ok:
             QtWidgets.QMessageBox.critical(self, "Build failed", "arduino-cli compile failed. See log.")
             return None
         return os.path.join(build_dir, f"ControlMouse.ino{board['ext']}")
