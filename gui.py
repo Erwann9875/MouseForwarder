@@ -1,6 +1,6 @@
 import sys, threading, time, subprocess, os, shutil, json, re, tarfile, zipfile, urllib.request, tempfile, base64
 import serial, serial.tools.list_ports
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtWidgets, QtGui
 
 if sys.platform != "win32":
     raise SystemExit("This app supports Windows only.")
@@ -9,6 +9,7 @@ from security import start_security_guard
 from auth_guard import start_integrity_monitor, set_session_token, require_auth
 from mouse_blocker import MouseBlocker, EscapeListener, RawInputFilter
 from serial_sender import SerialSender
+from ndi_receiver import NDIReceiver
 from constants import (
     DEFAULT_BLOCKED,
     BOSSAC_URL,
@@ -179,9 +180,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sender.connectedChanged.connect(self.on_connected_changed)
         self.sender.statsUpdated.connect(self.on_stats)
 
-        central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
-        layout = QtWidgets.QVBoxLayout(central)
+        self.ndi = NDIReceiver()
+        self.ndi.connectedChanged.connect(self._on_ndi_connected)
+        self.ndi.sourcesUpdated.connect(self._on_ndi_sources)
+        self.ndi.frameReady.connect(self._on_ndi_frame)
+        self._ndi_last_frame: QtGui.QImage | None = None
+        self._ndi_debug_win = None
+
+        tabs = QtWidgets.QTabWidget()
+        self.setCentralWidget(tabs)
+        mousePage = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(mousePage)
 
         g1 = QtWidgets.QGroupBox("Arduino connection")
         l1 = QtWidgets.QGridLayout(g1)
@@ -268,6 +277,30 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(g2)
         layout.addWidget(g3)
         layout.addWidget(tips)
+        tabs.addTab(mousePage, "Mouse")
+
+        ndiPage = QtWidgets.QWidget()
+        gl = QtWidgets.QGridLayout(ndiPage)
+        self.ndiSource = QtWidgets.QComboBox()
+        self.ndiRefresh = QtWidgets.QPushButton("Refresh")
+        self.ndiConnect = QtWidgets.QPushButton("Connect")
+        self.ndiConnect.setCheckable(True)
+        self.ndiPreview = QtWidgets.QLabel()
+        self.ndiPreview.setMinimumSize(320, 180)
+        self.ndiPreview.setAlignment(QtCore.Qt.AlignCenter)
+        self.ndiPreview.setStyleSheet("background:#0b0d12;border:1px solid #2a2f3a;")
+        self.ndiOpenDebug = QtWidgets.QPushButton("Open Debug")
+        gl.addWidget(QtWidgets.QLabel("Source:"), 0, 0)
+        gl.addWidget(self.ndiSource, 0, 1)
+        gl.addWidget(self.ndiRefresh, 0, 2)
+        gl.addWidget(self.ndiConnect, 1, 1)
+        gl.addWidget(self.ndiOpenDebug, 1, 2)
+        gl.addWidget(self.ndiPreview, 2, 0, 1, 3)
+        tabs.addTab(ndiPage, "NDI")
+
+        self.ndiRefresh.clicked.connect(self.ndi.refresh_sources)
+        self.ndiConnect.toggled.connect(self._on_ndi_connect_toggled)
+        self.ndiOpenDebug.clicked.connect(self._open_ndi_debug)
 
         self.blocker = MouseBlocker()
         self.blocker.set_blocked(self._blocked_buttons())
@@ -296,6 +329,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.flashLogLine.connect(self._on_flash_log)
 
         self.fill_ports()
+        QtCore.QTimer.singleShot(0, self.ndi.refresh_sources)
 
     def fill_ports(self):
         current = self.portCombo.currentData()
@@ -402,6 +436,10 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self.blocker.stop()
             self.escape.stop()
+            try:
+                self.ndi.stop()
+            except Exception:
+                pass
         finally:
             super().closeEvent(event)
 
@@ -782,6 +820,94 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.statusBar().showMessage("Flash failed", 5000)
             QtWidgets.QMessageBox.critical(self, "Flash FAILED", "Upload returned an error. See the log for details.")
+
+    @QtCore.Slot(bool)
+    def _on_ndi_connected(self, ok: bool):
+        self.ndiConnect.blockSignals(True)
+        self.ndiConnect.setChecked(ok)
+        self.ndiConnect.blockSignals(False)
+        self.ndiConnect.setText("Disconnect" if ok else "Connect")
+        self.statusBar().showMessage("NDI connected" if ok else "NDI disconnected", 3000)
+        if not ok:
+            self._ndi_last_frame = None
+            self.ndiPreview.clear()
+            if hasattr(self, '_ndi_debug_win') and self._ndi_debug_win is not None:
+                try:
+                    self._ndi_debug_win.update_frame(None)
+                except Exception:
+                    pass
+
+    @QtCore.Slot(object)
+    def _on_ndi_sources(self, names):
+        cur = self.ndiSource.currentText()
+        self.ndiSource.clear()
+        for n in names:
+            self.ndiSource.addItem(n)
+        if cur:
+            i = self.ndiSource.findText(cur)
+            if i >= 0:
+                self.ndiSource.setCurrentIndex(i)
+        if not names:
+            self.statusBar().showMessage("No NDI sources found (connect for dummy)", 4000)
+
+    @QtCore.Slot()
+    def _open_ndi_debug(self):
+        if not hasattr(self, '_ndi_debug_win') or self._ndi_debug_win is None:
+            self._ndi_debug_win = NDIDebugWindow(self)
+            if self._ndi_last_frame is not None:
+                self._ndi_debug_win.update_frame(self._ndi_last_frame)
+        self._ndi_debug_win.show()
+        self._ndi_debug_win.raise_()
+        self._ndi_debug_win.activateWindow()
+
+    @QtCore.Slot(QtGui.QImage)
+    def _on_ndi_frame(self, img: QtGui.QImage):
+        self._ndi_last_frame = img
+        if not img.isNull():
+            pm = QtGui.QPixmap.fromImage(img)
+            self.ndiPreview.setPixmap(pm.scaled(self.ndiPreview.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        if hasattr(self, '_ndi_debug_win') and self._ndi_debug_win is not None:
+            self._ndi_debug_win.update_frame(img)
+
+    def _on_ndi_connect_toggled(self, checked: bool):
+        if checked:
+            name = self.ndiSource.currentText() or None
+            self.ndi.start(name)
+        else:
+            self.ndi.stop()
+            self._on_ndi_connected(False)
+
+class NDIDebugWindow(QtWidgets.QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("NDI Debug")
+        self.setMinimumSize(560, 315)
+        v = QtWidgets.QVBoxLayout(self)
+        self.view = QtWidgets.QLabel()
+        self.view.setAlignment(QtCore.Qt.AlignCenter)
+        self.view.setStyleSheet("background:#0b0d12;border:1px solid #2a2f3a;")
+        self.stats = QtWidgets.QLabel("")
+        v.addWidget(self.view)
+        v.addWidget(self.stats)
+        self._last_time = None
+        self._fps = 0.0
+
+    def update_frame(self, img: QtGui.QImage | None):
+        if img is None or (hasattr(img, 'isNull') and img.isNull()):
+            self.view.clear()
+            self.stats.setText("")
+            self._last_time = None
+            self._fps = 0.0
+            return
+        pm = QtGui.QPixmap.fromImage(img)
+        self.view.setPixmap(pm.scaled(self.view.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        t = time.time()
+        if self._last_time is not None:
+            dt = max(1e-3, t - self._last_time)
+            self._fps = self._fps * 0.9 + (1.0/dt) * 0.1
+        self._last_time = t
+        self.stats.setText(f"{img.width()}x{img.height()}  |  ~{self._fps:.1f} fps")
+
 
 def main():
     app = QtWidgets.QApplication(sys.argv)

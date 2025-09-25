@@ -77,7 +77,6 @@ def _has_debugger() -> bool:
         pass
     return False
 
-
 def require_auth() -> None:
     if _has_debugger():
         os._exit(1)
@@ -85,7 +84,6 @@ def require_auth() -> None:
         os._exit(1)
     if globals().get('_SESSION_KEY') is None:
         raise PermissionError('Authentication required')
-
 
 def start_integrity_monitor(interval: float = 1.5) -> None:
     if os.getenv('MF_DISABLE_INTEGRITY') == '1':
