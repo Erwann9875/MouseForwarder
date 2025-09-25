@@ -33,6 +33,75 @@ QProgressBar { border: 1px solid #2a2f3a; border-radius: 6px; background: #1c1f2
 QProgressBar::chunk { background-color: #2e8bff; }
 """
 
+
+def authenticate_user(username: str, password: str) -> tuple[bool, str | None]:
+    # Example of a future API call:
+    # import requests
+    # try:
+    #     r = requests.post(
+    #         "https://api.test.com/login",
+    #         json={"username": username, "password": password},
+    #         timeout=5,
+    #     )
+    #     r.raise_for_status()
+    #     data = r.json()
+    #     return True, data.get("token")
+    # except Exception:
+    #     return False, None
+
+    if username == "test" and password == "test":
+        return True, None
+    return False, None
+
+
+class LoginDialog(QtWidgets.QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Sign in")
+        self.setModal(True)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        self.userEdit = QtWidgets.QLineEdit()
+        self.passEdit = QtWidgets.QLineEdit()
+        self.passEdit.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.userEdit.setPlaceholderText("Username")
+        self.passEdit.setPlaceholderText("Password")
+        form.addRow("Username", self.userEdit)
+        form.addRow("Password", self.passEdit)
+
+        self.errorLbl = QtWidgets.QLabel("")
+        self.errorLbl.setStyleSheet("color:#ff6b6b;")
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        btns.accepted.connect(self._try_login)
+        btns.rejected.connect(self.reject)
+
+        layout.addLayout(form)
+        layout.addWidget(self.errorLbl)
+        layout.addWidget(btns)
+
+        self.userEdit.returnPressed.connect(self._try_login)
+        self.passEdit.returnPressed.connect(self._try_login)
+
+        # Small default for quick testing
+        self.userEdit.setText("")
+        self.passEdit.setText("")
+
+        self.token: str | None = None
+
+    def _try_login(self):
+        u = self.userEdit.text().strip()
+        p = self.passEdit.text()
+        ok, token = authenticate_user(u, p)
+        if ok:
+            self.token = token
+            self.accept()
+        else:
+            self.errorLbl.setText("Invalid credentials. Use test/test for now.")
+
 def appdata_dir():
     base = os.getenv("APPDATA") or os.path.expanduser("~")
     folder = os.path.join(base, APP_NAME)
@@ -709,6 +778,10 @@ class MainWindow(QtWidgets.QMainWindow):
 def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setStyleSheet(DARK_QSS)
+    login = LoginDialog()
+    if login.exec() != QtWidgets.QDialog.Accepted:
+        sys.exit(0)
+
     w = MainWindow()
     w.show()
     sys.exit(app.exec())
