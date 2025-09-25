@@ -4,6 +4,7 @@ import queue
 import time
 import serial
 from PySide6 import QtCore
+from auth_guard import require_auth
 
 class SerialSender(QtCore.QObject):
     connectedChanged = QtCore.Signal(bool)
@@ -19,6 +20,7 @@ class SerialSender(QtCore.QObject):
     def open(self, port: str, baud: int = 1000000):
         self.close()
         try:
+            require_auth()
             self.ser = serial.Serial(port=port, baudrate=baud, timeout=0, write_timeout=0)
             self._running = True
             self._writer = threading.Thread(target=self._writer_loop, daemon=True)
@@ -44,6 +46,10 @@ class SerialSender(QtCore.QObject):
 
     def send_delta(self, dx: int, dy: int):
         if not self._running or not self.ser:
+            return
+        try:
+            require_auth()
+        except Exception:
             return
         dx = 127 if dx > 127 else (-128 if dx < -128 else dx)
         dy = 127 if dy > 127 else (-128 if dy < -128 else dy)

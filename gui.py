@@ -1,4 +1,4 @@
-import sys, threading, time, subprocess, os, shutil, json, re, tarfile, zipfile, urllib.request, tempfile
+import sys, threading, time, subprocess, os, shutil, json, re, tarfile, zipfile, urllib.request, tempfile, base64
 import serial, serial.tools.list_ports
 from PySide6 import QtCore, QtWidgets
 
@@ -6,6 +6,7 @@ if sys.platform != "win32":
     raise SystemExit("This app supports Windows only.")
 
 from security import start_security_guard
+from auth_guard import start_integrity_monitor, set_session_token, require_auth
 from mouse_blocker import MouseBlocker, EscapeListener, RawInputFilter
 from serial_sender import SerialSender
 from constants import (
@@ -18,6 +19,7 @@ from constants import (
 )
 
 start_security_guard()
+start_integrity_monitor()
 
 DARK_QSS = """
 * { font-family: 'Segoe UI', sans-serif; font-size: 12px; }
@@ -35,7 +37,6 @@ QProgressBar::chunk { background-color: #2e8bff; }
 
 
 def authenticate_user(username: str, password: str) -> tuple[bool, str | None]:
-    # Example of a future API call:
     # import requests
     # try:
     #     r = requests.post(
@@ -50,7 +51,7 @@ def authenticate_user(username: str, password: str) -> tuple[bool, str | None]:
     #     return False, None
 
     if username == "test" and password == "test":
-        return True, None
+        return True, base64.b64encode(os.urandom(16)).decode('ascii')
     return False, None
 
 
@@ -86,7 +87,6 @@ class LoginDialog(QtWidgets.QDialog):
         self.userEdit.returnPressed.connect(self._try_login)
         self.passEdit.returnPressed.connect(self._try_login)
 
-        # Small default for quick testing
         self.userEdit.setText("")
         self.passEdit.setText("")
 
@@ -97,6 +97,10 @@ class LoginDialog(QtWidgets.QDialog):
         p = self.passEdit.text()
         ok, token = authenticate_user(u, p)
         if ok:
+            try:
+                set_session_token(u, p)
+            except Exception:
+                pass
             self.token = token
             self.accept()
         else:
@@ -335,6 +339,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusLbl.setText("Disconnected")
 
     def on_toggle_forwarding(self, enabled):
+        try:
+            require_auth()
+        except Exception:
+            enabled = False
         self.forwarding = enabled
         self.toggleBtn.setText("Stop forwarding" if enabled else "Start forwarding")
         app = QtWidgets.QApplication.instance()

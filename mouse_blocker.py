@@ -1,6 +1,7 @@
 import ctypes
 from ctypes import wintypes
 from PySide6 import QtCore
+from auth_guard import require_auth
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 WM_INPUT = 0x00FF
@@ -154,6 +155,10 @@ class MouseBlocker:
                     return 1
             return CallNextHookEx(self._hook, nCode, wParam, lParam)
 
+        try:
+            require_auth()
+        except Exception:
+            raise OSError("Authentication required to start mouse blocker")
         self._proc = HOOKPROC(_callback)
         self._hook = SetWindowsHookEx(WH_MOUSE_LL, self._proc, 0, 0)
         if not self._hook:
@@ -221,6 +226,10 @@ class RawInputFilter(QtCore.QAbstractNativeEventFilter):
 
     def register(self):
         if self._registered:
+            return
+        try:
+            require_auth()
+        except Exception:
             return
         rid = RAWINPUTDEVICE()
         rid.usUsagePage = 0x01

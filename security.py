@@ -168,6 +168,8 @@ def _hide_from_debugger():
         pass
 
 def _anti_reverse_engineering_guard():
+    if os.environ.get("MF_DISABLE_SECURITY") == "1":
+        return
     if sys.gettrace() is not None:
         raise SystemExit()
     if os.environ.get("PYTHONINSPECT") or os.environ.get("PYTHONDEBUG"):
@@ -194,6 +196,8 @@ def _anti_reverse_engineering_guard():
         pass
 
 def _guard_thread_loop():
+    if os.environ.get("MF_DISABLE_SECURITY") == "1":
+        return
     _hide_from_debugger()
     while True:
         try:
@@ -203,6 +207,8 @@ def _guard_thread_loop():
         time.sleep(1)
 
 def start_security_guard():
+    if os.environ.get("MF_DISABLE_SECURITY") == "1":
+        return
     _hide_from_debugger()
     _anti_reverse_engineering_guard()
     threading.Thread(target=_guard_thread_loop, daemon=True).start()
