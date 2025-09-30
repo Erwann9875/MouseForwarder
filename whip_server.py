@@ -88,6 +88,7 @@ class WhipServer(QtCore.QObject):
                 self._runner = None
                 self._site = None
                 self._pcs = set()
+                self._tasks = set()
                 self._aiohttp_ok = False
                 self._aiortc_ok = False
                 try:
@@ -108,6 +109,7 @@ class WhipServer(QtCore.QObject):
                 self._crop_w = 320
                 self._crop_h = 320
                 self._crop_center = True
+                self._reject_audio = True
 
             def stop_async(self):
                 if self._loop and self._stop_event:
@@ -167,6 +169,17 @@ class WhipServer(QtCore.QObject):
                             self._loop.run_until_complete(pc.close())
                         except Exception:
                             pass
+                    try:
+                        async def _cancel_pending():
+                            current = asyncio.current_task()
+                            tasks = [t for t in asyncio.all_tasks() if t is not current]
+                            for t in tasks:
+                                t.cancel()
+                            if tasks:
+                                await asyncio.gather(*tasks, return_exceptions=True)
+                        self._loop.run_until_complete(_cancel_pending())
+                    except Exception:
+                        pass
                     try:
                         self._loop.stop()
                     except Exception:
@@ -240,11 +253,28 @@ class WhipServer(QtCore.QObject):
                 @pc.on("track")
                 def on_track(track):
                     if track.kind == "video":
-                        self._loop.create_task(self._consume_video(track))
+                        t = self._loop.create_task(self._consume_video(track))
+                        self._tasks.add(t)
+                        t.add_done_callback(lambda _t: self._tasks.discard(_t))
                     elif track.kind == "audio":
-                        self._loop.create_task(self._consume_audio(track, audio_sink))
+                        t = self._loop.create_task(self._consume_audio(track, audio_sink))
+                        self._tasks.add(t)
+                        t.add_done_callback(lambda _t: self._tasks.discard(_t))
 
                 await pc.setRemoteDescription(RTCSessionDescription(sdp=offer, type="offer"))
+                if getattr(self, "_reject_audio", False):
+                    try:
+                        for tr in getattr(pc, "getTransceivers", lambda: [])():
+                            if getattr(tr, "kind", None) == "audio":
+                                try:
+                                    tr.stop()
+                                except Exception:
+                                    try:
+                                        tr.direction = "inactive"  # type: ignore[attr-defined]
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
                 answer = await pc.createAnswer()
                 await pc.setLocalDescription(answer)
 
@@ -256,12 +286,15 @@ class WhipServer(QtCore.QObject):
                 return web.Response(status=201, headers=headers, text=pc.localDescription.sdp)
 
             async def _consume_audio(self, track, sink):
+                import asyncio as _asyncio
                 try:
                     while True:
                         frame = await track.recv()
                         sink.write(frame)
+                except _asyncio.CancelledError:
+                    return
                 except Exception:
-                    pass
+                    return
 
             async def _consume_video(self, track):
                 import numpy as np  # type: ignore
@@ -284,8 +317,10 @@ class WhipServer(QtCore.QObject):
                         bytes_per_line = ch * w
                         qimg = QtGui.QImage(arr.data, w, h, bytes_per_line, QtGui.QImage.Format.Format_RGB888)
                         parent.frameReady.emit(qimg.copy())
+                except asyncio.CancelledError:
+                    return
                 except Exception:
-                    pass
+                    return
 
             async def _dummy_frames(self):
                 hue = 0

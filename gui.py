@@ -933,7 +933,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._whip_last_frame = img
         if not img.isNull():
             pm = QtGui.QPixmap.fromImage(img)
-            self.whipPreview.setPixmap(pm.scaled(self.whipPreview.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+            self.whipPreview.setPixmap(pm.scaled(self.whipPreview.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.FastTransformation))
         t = time.time()
         if self._whip_last_frame_t is not None:
             dt = max(1e-6, t - self._whip_last_frame_t)
