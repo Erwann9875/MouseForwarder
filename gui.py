@@ -9,7 +9,7 @@ from security import start_security_guard
 from auth_guard import start_integrity_monitor, set_session_token, require_auth
 from mouse_blocker import MouseBlocker, EscapeListener, RawInputFilter
 from serial_sender import SerialSender
-from ndi_receiver import NDIReceiver
+from whip_server import WhipServer
 from constants import (
     DEFAULT_BLOCKED,
     BOSSAC_URL,
@@ -180,12 +180,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sender.connectedChanged.connect(self.on_connected_changed)
         self.sender.statsUpdated.connect(self.on_stats)
 
-        self.ndi = NDIReceiver()
-        self.ndi.connectedChanged.connect(self._on_ndi_connected)
-        self.ndi.sourcesUpdated.connect(self._on_ndi_sources)
-        self.ndi.frameReady.connect(self._on_ndi_frame)
-        self._ndi_last_frame: QtGui.QImage | None = None
-        self._ndi_debug_win = None
+        self.whip = WhipServer()
+        self.whip.startedChanged.connect(self._on_whip_started)
+        self.whip.urlsUpdated.connect(self._on_whip_urls)
+        self.whip.statusChanged.connect(self._on_whip_status)
+        self.whip.frameReady.connect(self._on_whip_frame)
+        self._whip_last_frame: QtGui.QImage | None = None
+        self._whip_debug_win = None
 
         tabs = QtWidgets.QTabWidget()
         self.setCentralWidget(tabs)
@@ -279,28 +280,35 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(tips)
         tabs.addTab(mousePage, "Mouse")
 
-        ndiPage = QtWidgets.QWidget()
-        gl = QtWidgets.QGridLayout(ndiPage)
-        self.ndiSource = QtWidgets.QComboBox()
-        self.ndiRefresh = QtWidgets.QPushButton("Refresh")
-        self.ndiConnect = QtWidgets.QPushButton("Connect")
-        self.ndiConnect.setCheckable(True)
-        self.ndiPreview = QtWidgets.QLabel()
-        self.ndiPreview.setMinimumSize(320, 180)
-        self.ndiPreview.setAlignment(QtCore.Qt.AlignCenter)
-        self.ndiPreview.setStyleSheet("background:#0b0d12;border:1px solid #2a2f3a;")
-        self.ndiOpenDebug = QtWidgets.QPushButton("Open Debug")
-        gl.addWidget(QtWidgets.QLabel("Source:"), 0, 0)
-        gl.addWidget(self.ndiSource, 0, 1)
-        gl.addWidget(self.ndiRefresh, 0, 2)
-        gl.addWidget(self.ndiConnect, 1, 1)
-        gl.addWidget(self.ndiOpenDebug, 1, 2)
-        gl.addWidget(self.ndiPreview, 2, 0, 1, 3)
-        tabs.addTab(ndiPage, "NDI")
+        whipPage = QtWidgets.QWidget()
+        gl = QtWidgets.QGridLayout(whipPage)
+        self.whipPort = QtWidgets.QSpinBox()
+        self.whipPort.setRange(1, 65535)
+        self.whipPort.setValue(8080)
+        self.whipStart = QtWidgets.QPushButton("Start server")
+        self.whipStart.setCheckable(True)
+        self.whipPreview = QtWidgets.QLabel()
+        self.whipPreview.setMinimumSize(320, 180)
+        self.whipPreview.setAlignment(QtCore.Qt.AlignCenter)
+        self.whipPreview.setStyleSheet("background:#0b0d12;border:1px solid #2a2f3a;")
+        self.whipOpenDebug = QtWidgets.QPushButton("Open debug")
+        self.whipUrls = QtWidgets.QPlainTextEdit()
+        self.whipUrls.setReadOnly(True)
+        self.whipUrls.setMaximumBlockCount(100)
+        self.whipCopy = QtWidgets.QPushButton("Copy URLs")
+        gl.addWidget(QtWidgets.QLabel("Port:"), 0, 0)
+        gl.addWidget(self.whipPort, 0, 1)
+        gl.addWidget(self.whipStart, 0, 2)
+        gl.addWidget(QtWidgets.QLabel("WHIP ingest URLs:"), 1, 0)
+        gl.addWidget(self.whipUrls, 2, 0, 1, 3)
+        gl.addWidget(self.whipCopy, 3, 1)
+        gl.addWidget(self.whipOpenDebug, 3, 2)
+        gl.addWidget(self.whipPreview, 4, 0, 1, 3)
+        tabs.addTab(whipPage, "WHIP")
 
-        self.ndiRefresh.clicked.connect(self.ndi.refresh_sources)
-        self.ndiConnect.toggled.connect(self._on_ndi_connect_toggled)
-        self.ndiOpenDebug.clicked.connect(self._open_ndi_debug)
+        self.whipStart.toggled.connect(self._on_whip_start_toggled)
+        self.whipCopy.clicked.connect(self._copy_whip_urls)
+        self.whipOpenDebug.clicked.connect(self._open_whip_debug)
 
         self.blocker = MouseBlocker()
         self.blocker.set_blocked(self._blocked_buttons())
@@ -329,7 +337,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.flashLogLine.connect(self._on_flash_log)
 
         self.fill_ports()
-        QtCore.QTimer.singleShot(0, self.ndi.refresh_sources)
 
     def fill_ports(self):
         current = self.portCombo.currentData()
@@ -437,7 +444,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.blocker.stop()
             self.escape.stop()
             try:
-                self.ndi.stop()
+                self.whip.stop()
             except Exception:
                 pass
         finally:
@@ -822,65 +829,67 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Flash FAILED", "Upload returned an error. See the log for details.")
 
     @QtCore.Slot(bool)
-    def _on_ndi_connected(self, ok: bool):
-        self.ndiConnect.blockSignals(True)
-        self.ndiConnect.setChecked(ok)
-        self.ndiConnect.blockSignals(False)
-        self.ndiConnect.setText("Disconnect" if ok else "Connect")
-        self.statusBar().showMessage("NDI connected" if ok else "NDI disconnected", 3000)
+    def _on_whip_started(self, ok: bool):
+        self.whipStart.blockSignals(True)
+        self.whipStart.setChecked(ok)
+        self.whipStart.blockSignals(False)
+        self.whipStart.setText("Stop Server" if ok else "Start Server")
+        self.statusBar().showMessage("WHIP server running" if ok else "WHIP server stopped", 3000)
         if not ok:
-            self._ndi_last_frame = None
-            self.ndiPreview.clear()
-            if hasattr(self, '_ndi_debug_win') and self._ndi_debug_win is not None:
+            self._whip_last_frame = None
+            self.whipPreview.clear()
+            if hasattr(self, '_whip_debug_win') and self._whip_debug_win is not None:
                 try:
-                    self._ndi_debug_win.update_frame(None)
+                    self._whip_debug_win.update_frame(None)
                 except Exception:
                     pass
 
-    @QtCore.Slot(object)
-    def _on_ndi_sources(self, names):
-        cur = self.ndiSource.currentText()
-        self.ndiSource.clear()
-        for n in names:
-            self.ndiSource.addItem(n)
-        if cur:
-            i = self.ndiSource.findText(cur)
-            if i >= 0:
-                self.ndiSource.setCurrentIndex(i)
-        if not names:
-            self.statusBar().showMessage("No NDI sources found (connect for dummy)", 4000)
+    def _on_whip_status(self, text: str):
+        if text:
+            self.statusBar().showMessage(text, 4000)
+
+    def _on_whip_urls(self, urls: list[str]):
+        try:
+            self.whipUrls.setPlainText("\n".join(urls))
+        except Exception:
+            pass
 
     @QtCore.Slot()
-    def _open_ndi_debug(self):
-        if not hasattr(self, '_ndi_debug_win') or self._ndi_debug_win is None:
-            self._ndi_debug_win = NDIDebugWindow(self)
-            if self._ndi_last_frame is not None:
-                self._ndi_debug_win.update_frame(self._ndi_last_frame)
-        self._ndi_debug_win.show()
-        self._ndi_debug_win.raise_()
-        self._ndi_debug_win.activateWindow()
+    def _open_whip_debug(self):
+        if not hasattr(self, '_whip_debug_win') or self._whip_debug_win is None:
+            self._whip_debug_win = WHIPDebugWindow(self)
+            if self._whip_last_frame is not None:
+                self._whip_debug_win.update_frame(self._whip_last_frame)
+        self._whip_debug_win.show()
+        self._whip_debug_win.raise_()
+        self._whip_debug_win.activateWindow()
 
     @QtCore.Slot(QtGui.QImage)
-    def _on_ndi_frame(self, img: QtGui.QImage):
-        self._ndi_last_frame = img
+    def _on_whip_frame(self, img: QtGui.QImage):
+        self._whip_last_frame = img
         if not img.isNull():
             pm = QtGui.QPixmap.fromImage(img)
-            self.ndiPreview.setPixmap(pm.scaled(self.ndiPreview.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
-        if hasattr(self, '_ndi_debug_win') and self._ndi_debug_win is not None:
-            self._ndi_debug_win.update_frame(img)
+            self.whipPreview.setPixmap(pm.scaled(self.whipPreview.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        if hasattr(self, '_whip_debug_win') and self._whip_debug_win is not None:
+            self._whip_debug_win.update_frame(img)
 
-    def _on_ndi_connect_toggled(self, checked: bool):
+    def _on_whip_start_toggled(self, checked: bool):
         if checked:
-            name = self.ndiSource.currentText() or None
-            self.ndi.start(name)
+            self.whip.start(self.whipPort.value())
         else:
-            self.ndi.stop()
-            self._on_ndi_connected(False)
+            self.whip.stop()
+            self._on_whip_started(False)
 
-class NDIDebugWindow(QtWidgets.QDialog):
+    def _copy_whip_urls(self):
+        txt = self.whipUrls.toPlainText()
+        if txt:
+            QtWidgets.QApplication.clipboard().setText(txt)
+            self.statusBar().showMessage("Copied WHIP URLs to clipboard", 3000)
+
+class WHIPDebugWindow(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("NDI Debug")
+        self.setWindowTitle("WHIP Debug")
         self.setMinimumSize(560, 315)
         v = QtWidgets.QVBoxLayout(self)
         self.view = QtWidgets.QLabel()
