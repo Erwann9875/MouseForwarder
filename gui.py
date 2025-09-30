@@ -291,6 +291,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.whipPreview.setMinimumSize(320, 180)
         self.whipPreview.setAlignment(QtCore.Qt.AlignCenter)
         self.whipPreview.setStyleSheet("background:#0b0d12;border:1px solid #2a2f3a;")
+        self.whipStats = QtWidgets.QLabel("")
+        self.whipStats.setStyleSheet("color:#a9b1c7;")
         self.whipOpenDebug = QtWidgets.QPushButton("Open debug")
         self.whipUrls = QtWidgets.QPlainTextEdit()
         self.whipUrls.setReadOnly(True)
@@ -304,6 +306,36 @@ class MainWindow(QtWidgets.QMainWindow):
         gl.addWidget(self.whipCopy, 3, 1)
         gl.addWidget(self.whipOpenDebug, 3, 2)
         gl.addWidget(self.whipPreview, 4, 0, 1, 3)
+        gl.addWidget(self.whipStats, 5, 0, 1, 3)
+        cropBox = QtWidgets.QGroupBox("Crop")
+        cropLayout = QtWidgets.QGridLayout(cropBox)
+        self.cropEnable = QtWidgets.QCheckBox("Enable crop")
+        self.cropEnable.setChecked(False)
+        self.cropCenter = QtWidgets.QCheckBox("Center")
+        self.cropCenter.setChecked(True)
+        self.cropW = QtWidgets.QSpinBox()
+        self.cropW.setRange(1, 8192)
+        self.cropW.setValue(320)
+        self.cropH = QtWidgets.QSpinBox()
+        self.cropH.setRange(1, 8192)
+        self.cropH.setValue(320)
+        self.cropX = QtWidgets.QSpinBox()
+        self.cropX.setRange(0, 32768)
+        self.cropX.setValue(0)
+        self.cropY = QtWidgets.QSpinBox()
+        self.cropY.setRange(0, 32768)
+        self.cropY.setValue(0)
+        cropLayout.addWidget(self.cropEnable, 0, 0)
+        cropLayout.addWidget(self.cropCenter, 0, 1)
+        cropLayout.addWidget(QtWidgets.QLabel("W:"), 1, 0)
+        cropLayout.addWidget(self.cropW, 1, 1)
+        cropLayout.addWidget(QtWidgets.QLabel("H:"), 1, 2)
+        cropLayout.addWidget(self.cropH, 1, 3)
+        cropLayout.addWidget(QtWidgets.QLabel("X:"), 2, 0)
+        cropLayout.addWidget(self.cropX, 2, 1)
+        cropLayout.addWidget(QtWidgets.QLabel("Y:"), 2, 2)
+        cropLayout.addWidget(self.cropY, 2, 3)
+        gl.addWidget(cropBox, 6, 0, 1, 3)
         tabs.addTab(whipPage, "WHIP")
 
         self.whipStart.toggled.connect(self._on_whip_start_toggled)
@@ -337,6 +369,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.flashLogLine.connect(self._on_flash_log)
 
         self.fill_ports()
+
+        self._whip_last_frame_t: float | None = None
+        self._whip_fps_ema: float = 0.0
+        self._whip_ms_ema: float = 0.0
+
+        def _on_crop_changed_local():
+            center = self.cropCenter.isChecked()
+            self.cropX.setEnabled(not center)
+            self.cropY.setEnabled(not center)
+            try:
+                self.whip.set_crop_config(
+                    self.cropEnable.isChecked(),
+                    int(self.cropX.value()),
+                    int(self.cropY.value()),
+                    int(self.cropW.value()),
+                    int(self.cropH.value()),
+                    center,
+                )
+            except Exception:
+                pass
+
+        self.cropEnable.toggled.connect(_on_crop_changed_local)
+        self.cropCenter.toggled.connect(_on_crop_changed_local)
+        self.cropW.valueChanged.connect(lambda _v: _on_crop_changed_local())
+        self.cropH.valueChanged.connect(lambda _v: _on_crop_changed_local())
+        self.cropX.valueChanged.connect(lambda _v: _on_crop_changed_local())
+        self.cropY.valueChanged.connect(lambda _v: _on_crop_changed_local())
+        _on_crop_changed_local()
 
     def fill_ports(self):
         current = self.portCombo.currentData()
@@ -838,6 +898,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not ok:
             self._whip_last_frame = None
             self.whipPreview.clear()
+            self.whipStats.setText("")
+            self._whip_last_frame_t = None
+            self._whip_fps_ema = 0.0
+            self._whip_ms_ema = 0.0
             if hasattr(self, '_whip_debug_win') and self._whip_debug_win is not None:
                 try:
                     self._whip_debug_win.update_frame(None)
@@ -870,6 +934,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if not img.isNull():
             pm = QtGui.QPixmap.fromImage(img)
             self.whipPreview.setPixmap(pm.scaled(self.whipPreview.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        t = time.time()
+        if self._whip_last_frame_t is not None:
+            dt = max(1e-6, t - self._whip_last_frame_t)
+            cur_fps = 1.0 / dt
+            cur_ms = dt * 1000.0
+            self._whip_fps_ema = (self._whip_fps_ema * 0.9) + (cur_fps * 0.1) if self._whip_fps_ema > 0 else cur_fps
+            self._whip_ms_ema = (self._whip_ms_ema * 0.9) + (cur_ms * 0.1) if self._whip_ms_ema > 0 else cur_ms
+            try:
+                self.whipStats.setText(f"{img.width()}x{img.height()}  |  ~{self._whip_fps_ema:.1f} fps  |  ~{self._whip_ms_ema:.1f} ms")
+            except Exception:
+                pass
+        self._whip_last_frame_t = t
         if hasattr(self, '_whip_debug_win') and self._whip_debug_win is not None:
             self._whip_debug_win.update_frame(img)
 
@@ -900,6 +976,7 @@ class WHIPDebugWindow(QtWidgets.QDialog):
         v.addWidget(self.stats)
         self._last_time = None
         self._fps = 0.0
+        self._ms = 0.0
 
     def update_frame(self, img: QtGui.QImage | None):
         if img is None or (hasattr(img, 'isNull') and img.isNull()):
@@ -907,6 +984,7 @@ class WHIPDebugWindow(QtWidgets.QDialog):
             self.stats.setText("")
             self._last_time = None
             self._fps = 0.0
+            self._ms = 0.0
             return
         pm = QtGui.QPixmap.fromImage(img)
         self.view.setPixmap(pm.scaled(self.view.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
@@ -914,8 +992,9 @@ class WHIPDebugWindow(QtWidgets.QDialog):
         if self._last_time is not None:
             dt = max(1e-3, t - self._last_time)
             self._fps = self._fps * 0.9 + (1.0/dt) * 0.1
+            self._ms = self._ms * 0.9 + (dt * 1000.0) * 0.1 if self._ms > 0 else (dt * 1000.0)
         self._last_time = t
-        self.stats.setText(f"{img.width()}x{img.height()}  |  ~{self._fps:.1f} fps")
+        self.stats.setText(f"{img.width()}x{img.height()}  |  ~{self._fps:.1f} fps  |  ~{self._ms:.1f} ms")
 
 
 def main():

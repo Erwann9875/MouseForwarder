@@ -17,6 +17,14 @@ class WhipServer(QtCore.QObject):
         self._worker: Optional[QtCore.QObject] = None
         self._running = False
         self._port = 8080
+        self._crop_cfg = {
+            "enabled": False,
+            "x": 0,
+            "y": 0,
+            "w": 320,
+            "h": 320,
+            "center": True,
+        }
 
     @QtCore.Slot(int)
     def start(self, port: int = 8080):
@@ -43,6 +51,29 @@ class WhipServer(QtCore.QObject):
         self._thread = None
         self._worker = None
         self.startedChanged.emit(False)
+
+    @QtCore.Slot(bool, int, int, int, int, bool)
+    def set_crop_config(self, enabled: bool, x: int, y: int, w: int, h: int, center: bool):
+        self._crop_cfg.update({
+            "enabled": bool(enabled),
+            "x": int(max(0, x)),
+            "y": int(max(0, y)),
+            "w": int(max(1, w)),
+            "h": int(max(1, h)),
+            "center": bool(center),
+        })
+        try:
+            if self._worker is not None and hasattr(self._worker, 'set_crop_config_async'):
+                self._worker.set_crop_config_async(
+                    self._crop_cfg["enabled"],
+                    self._crop_cfg["x"],
+                    self._crop_cfg["y"],
+                    self._crop_cfg["w"],
+                    self._crop_cfg["h"],
+                    self._crop_cfg["center"],
+                )
+        except Exception:
+            pass
 
     def _start_worker(self):
         parent = self
@@ -71,12 +102,35 @@ class WhipServer(QtCore.QObject):
                 except Exception:
                     self._aiortc_ok = False
 
+                self._crop_enabled = False
+                self._crop_x = 0
+                self._crop_y = 0
+                self._crop_w = 320
+                self._crop_h = 320
+                self._crop_center = True
+
             def stop_async(self):
                 if self._loop and self._stop_event:
                     def _set():
                         if not self._stop_event.is_set():
                             self._stop_event.set()
                     self._loop.call_soon_threadsafe(_set)
+
+            def set_crop_config_async(self, enabled: bool, x: int, y: int, w: int, h: int, center: bool):
+                def _apply():
+                    self._crop_enabled = bool(enabled)
+                    self._crop_x = max(0, int(x))
+                    self._crop_y = max(0, int(y))
+                    self._crop_w = max(1, int(w))
+                    self._crop_h = max(1, int(h))
+                    self._crop_center = bool(center)
+                if self._loop:
+                    try:
+                        self._loop.call_soon_threadsafe(_apply)
+                    except Exception:
+                        _apply()
+                else:
+                    _apply()
 
             def _local_urls(self) -> List[str]:
                 addrs: List[str] = ["127.0.0.1"]
@@ -216,6 +270,17 @@ class WhipServer(QtCore.QObject):
                         frame = await track.recv()
                         arr = frame.to_ndarray(format="rgb24")
                         h, w, ch = arr.shape
+                        if self._crop_enabled:
+                            cw = int(min(max(1, self._crop_w), w))
+                            chh = int(min(max(1, self._crop_h), h))
+                            if self._crop_center:
+                                x = max(0, (w - cw) // 2)
+                                y = max(0, (h - chh) // 2)
+                            else:
+                                x = max(0, min(self._crop_x, w - cw))
+                                y = max(0, min(self._crop_y, h - chh))
+                            arr = arr[y:y+chh, x:x+cw, :].copy()
+                            h, w, ch = arr.shape
                         bytes_per_line = ch * w
                         qimg = QtGui.QImage(arr.data, w, h, bytes_per_line, QtGui.QImage.Format.Format_RGB888)
                         parent.frameReady.emit(qimg.copy())
@@ -239,7 +304,18 @@ class WhipServer(QtCore.QObject):
                     ts = time.strftime("%H:%M:%S")
                     painter.drawText(12, 28, f"WHIP server inactive — {ts}")
                     painter.end()
-                    parent.frameReady.emit(img)
+                    if self._crop_enabled:
+                        cw = int(min(max(1, self._crop_w), w))
+                        chh = int(min(max(1, self._crop_h), h))
+                        if self._crop_center:
+                            x = max(0, (w - cw) // 2)
+                            y = max(0, (h - chh) // 2)
+                        else:
+                            x = max(0, min(self._crop_x, w - cw))
+                            y = max(0, min(self._crop_y, h - chh))
+                        parent.frameReady.emit(img.copy(x, y, cw, chh))
+                    else:
+                        parent.frameReady.emit(img)
                     hue = (hue + 2) % 360
                     await asyncio.sleep(1/30)
 
@@ -250,4 +326,14 @@ class WhipServer(QtCore.QObject):
         self._worker = worker
         self._thread = th
         th.start()
-
+        try:
+            worker.set_crop_config_async(
+                self._crop_cfg["enabled"],
+                self._crop_cfg["x"],
+                self._crop_cfg["y"],
+                self._crop_cfg["w"],
+                self._crop_cfg["h"],
+                self._crop_cfg["center"],
+            )
+        except Exception:
+            pass
